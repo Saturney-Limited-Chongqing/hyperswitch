@@ -1,3 +1,7 @@
+// Collection merchants use the platform-managed payment infrastructure.
+pub const ROLE_ID_COLLECTION_MERCHANT_ADMIN: &str = "collection_merchant_admin";
+pub const ROLE_ID_COLLECTION_MERCHANT_VIEW_ONLY: &str = "collection_merchant_view_only";
+
 // User Roles
 pub const ROLE_ID_MERCHANT_ADMIN: &str = "merchant_admin";
 pub const ROLE_ID_MERCHANT_VIEW_ONLY: &str = "merchant_view_only";

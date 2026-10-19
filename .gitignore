@@ -274,3 +274,6 @@ creds.json
 # Nix services data
 /data
 .pre-commit-config.yaml
+
+# Independently cloned Control Center frontend (see docs/collection_merchant_dashboards.md)
+/control-center/

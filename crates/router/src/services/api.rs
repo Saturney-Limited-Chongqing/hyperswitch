@@ -256,6 +256,23 @@ where
         .await
         .switch()?;
 
+    // A service key has no dashboard role. Enforce the collection boundary here
+    // as well, before any handler runs, so switching JWT to api-key cannot grant
+    // channel administration. Admin credentials retain their existing access.
+    super::authorization::collection::check_service_key_flow(
+        &session_state.conf.platform.collection_merchant_ids,
+        &auth_type,
+        &flow.to_string(),
+    )
+    .switch()?;
+
+    super::authorization::collection::check_request_overrides(
+        &session_state.conf.platform.collection_merchant_ids,
+        &auth_type,
+        &serialized_request,
+    )
+    .switch()?;
+
     request_state.event_context.record_info(auth_type.clone());
 
     let merchant_id = auth_type

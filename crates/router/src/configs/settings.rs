@@ -455,6 +455,10 @@ pub struct CloneConnectorAllowlistConfig {
 pub struct Platform {
     pub enabled: bool,
     pub allow_connected_merchants: bool,
+    /// Merchants whose service API keys are limited to collection operations.
+    /// Register these alongside assigning collection dashboard roles.
+    #[serde(default)]
+    pub collection_merchant_ids: HashSet<id_type::MerchantId>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

@@ -202,6 +202,11 @@ pub async fn update_user_role(
     .await
     .change_context(UserErrors::InternalServerError)?;
 
+    if !updator_role.can_delegate_role(&role_info) {
+        return Err(report!(UserErrors::InvalidRoleOperation))
+            .attach_printable("Collection merchants cannot grant platform management roles");
+    }
+
     let mut is_updated = false;
 
     let v2_user_role_to_be_updated = match state
@@ -255,6 +260,11 @@ pub async fn update_user_role(
                 role_to_be_updated.get_entity_type(),
                 role_info.get_entity_type(),
             ));
+        }
+
+        if !updator_role.can_delegate_role(&role_to_be_updated) {
+            return Err(report!(UserErrors::InvalidRoleOperation))
+                .attach_printable("Collection merchants cannot change platform management users");
         }
 
         if updator_role.get_entity_type() < role_to_be_updated.get_entity_type() {
@@ -339,6 +349,11 @@ pub async fn update_user_role(
                 role_to_be_updated.get_entity_type(),
                 role_info.get_entity_type(),
             ));
+        }
+
+        if !updator_role.can_delegate_role(&role_to_be_updated) {
+            return Err(report!(UserErrors::InvalidRoleOperation))
+                .attach_printable("Collection merchants cannot change platform management users");
         }
 
         if updator_role.get_entity_type() < role_to_be_updated.get_entity_type() {
@@ -606,6 +621,11 @@ pub async fn delete_user_role(
             ));
         }
 
+        if !deletion_requestor_role_info.can_delegate_role(&target_role_info) {
+            return Err(report!(UserErrors::InvalidRoleOperation))
+                .attach_printable("Collection merchants cannot delete platform management users");
+        }
+
         if deletion_requestor_role_info.get_entity_type() < target_role_info.get_entity_type() {
             return Err(report!(UserErrors::InvalidDeleteOperation)).attach_printable(format!(
                 "Invalid operation, deletion requestor = {} cannot delete target = {}",
@@ -679,6 +699,11 @@ pub async fn delete_user_role(
                 "Invalid operation, role_id = {} is not deletable",
                 role_to_be_deleted.role_id
             ));
+        }
+
+        if !deletion_requestor_role_info.can_delegate_role(&target_role_info) {
+            return Err(report!(UserErrors::InvalidRoleOperation))
+                .attach_printable("Collection merchants cannot delete platform management users");
         }
 
         if deletion_requestor_role_info.get_entity_type() < target_role_info.get_entity_type() {

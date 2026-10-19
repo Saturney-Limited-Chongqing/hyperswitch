@@ -138,12 +138,44 @@ mod tests {
         types::{self, storage::enums},
     };
 
+    async fn create_test_merchant_key(
+        store: &dyn routes::app::StorageInterface,
+        merchant_id: &common_utils::id_type::MerchantId,
+    ) -> types::domain::MerchantKeyStore {
+        use crate::types::domain;
+        let master_key = store.get_master_key();
+        let key_manager_state = common_utils::types::keymanager::KeyManagerState::mock();
+        let key = domain::types::crypto_operation(
+            &key_manager_state,
+            common_utils::type_name!(domain::MerchantKeyStore),
+            domain::types::CryptoOperation::EncryptLocally(
+                services::generate_aes256_key().unwrap().to_vec().into(),
+            ),
+            common_utils::types::keymanager::Identifier::Merchant(merchant_id.clone()),
+            master_key,
+        )
+        .await
+        .and_then(|value| value.try_into_operation())
+        .unwrap();
+        store
+            .insert_merchant_key_store(
+                domain::MerchantKeyStore {
+                    merchant_id: merchant_id.clone(),
+                    key,
+                    created_at: common_utils::date_time::now(),
+                },
+                &master_key.to_vec().into(),
+            )
+            .await
+            .unwrap()
+    }
+
     async fn create_single_connection_test_transaction_pool() -> routes::AppState {
         // Set pool size to 1 and minimum idle connection size to 0
-        std::env::set_var("ROUTER__MASTER_DATABASE__POOL_SIZE", "1");
-        std::env::set_var("ROUTER__MASTER_DATABASE__MIN_IDLE", "0");
-        std::env::set_var("ROUTER__REPLICA_DATABASE__POOL_SIZE", "1");
-        std::env::set_var("ROUTER__REPLICA_DATABASE__MIN_IDLE", "0");
+        std::env::set_var("ROUTER__MASTER_DATABASE__MAX_POOL_SIZE", "1");
+        std::env::set_var("ROUTER__MASTER_DATABASE__MIN_IDLE_POOL_SIZE", "0");
+        std::env::set_var("ROUTER__REPLICA_DATABASE__MAX_POOL_SIZE", "1");
+        std::env::set_var("ROUTER__REPLICA_DATABASE__MIN_IDLE_POOL_SIZE", "0");
 
         let conf = Settings::new().expect("invalid settings");
         let tx: oneshot::Sender<()> = oneshot::channel().0;
@@ -231,7 +263,7 @@ mod tests {
             extended_authorization_last_applied_at: Default::default(),
             capture_before: Default::default(),
             card_discovery: Default::default(),
-            processor_merchant_id: Default::default(),
+            processor_merchant_id: merchant_id.clone(),
             created_by: None,
             setup_future_usage_applied: Default::default(),
             routing_approach: Default::default(),
@@ -263,13 +295,7 @@ mod tests {
             .stores
             .get(state.conf.multitenancy.get_tenant_ids().first().unwrap())
             .unwrap();
-        let key_store = store
-            .get_merchant_key_store_by_merchant_id(
-                &merchant_id,
-                &store.get_master_key().to_vec().into(),
-            )
-            .await
-            .unwrap();
+        let key_store = create_test_merchant_key(store.as_ref(), &merchant_id).await;
         let response = store
             .insert_payment_attempt(
                 payment_attempt,
@@ -360,7 +386,7 @@ mod tests {
             extended_authorization_last_applied_at: Default::default(),
             capture_before: Default::default(),
             card_discovery: Default::default(),
-            processor_merchant_id: Default::default(),
+            processor_merchant_id: merchant_id.clone(),
             created_by: None,
             setup_future_usage_applied: Default::default(),
             routing_approach: Default::default(),
@@ -391,13 +417,7 @@ mod tests {
             .stores
             .get(state.conf.multitenancy.get_tenant_ids().first().unwrap())
             .unwrap();
-        let key_store = store
-            .get_merchant_key_store_by_merchant_id(
-                &merchant_id,
-                &store.get_master_key().to_vec().into(),
-            )
-            .await
-            .unwrap();
+        let key_store = create_test_merchant_key(store.as_ref(), &merchant_id).await;
         store
             .insert_payment_attempt(
                 payment_attempt,
@@ -503,7 +523,7 @@ mod tests {
             extended_authorization_last_applied_at: Default::default(),
             capture_before: Default::default(),
             card_discovery: Default::default(),
-            processor_merchant_id: Default::default(),
+            processor_merchant_id: merchant_id.clone(),
             created_by: None,
             setup_future_usage_applied: Default::default(),
             routing_approach: Default::default(),
@@ -534,13 +554,7 @@ mod tests {
             .stores
             .get(state.conf.multitenancy.get_tenant_ids().first().unwrap())
             .unwrap();
-        let key_store = store
-            .get_merchant_key_store_by_merchant_id(
-                &merchant_id,
-                &store.get_master_key().to_vec().into(),
-            )
-            .await
-            .unwrap();
+        let key_store = create_test_merchant_key(store.as_ref(), &merchant_id).await;
         store
             .insert_payment_attempt(
                 payment_attempt,

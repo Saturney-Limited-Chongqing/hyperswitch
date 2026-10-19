@@ -765,6 +765,11 @@ async fn handle_invitation(
     .await
     .to_not_found_response(UserErrors::InvalidRoleId)?;
 
+    if !inviter_role_info.can_delegate_role(&req_role_info) {
+        return Err(report!(UserErrors::InvalidRoleOperation))
+            .attach_printable("Collection merchants cannot grant platform management roles");
+    }
+
     if inviter_role_info.get_entity_type() < req_role_info.get_entity_type() {
         Err(report!(UserErrors::InvalidRoleOperationWithMessage(
             "Inviter role entity type is lower than requested role entity type".to_string(),

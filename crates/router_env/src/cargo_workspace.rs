@@ -12,6 +12,7 @@ pub fn set_cargo_workspace_members_env() {
     use std::io::Write;
 
     let metadata = cargo_metadata::MetadataCommand::new()
+        .no_deps()
         .exec()
         .expect("Failed to obtain cargo metadata");
 
@@ -42,6 +43,7 @@ pub fn set_cargo_workspace_members_env() {
 pub fn verify_cargo_metadata_format() {
     #[allow(clippy::expect_used)]
     let metadata = cargo_metadata::MetadataCommand::new()
+        .no_deps()
         .exec()
         .expect("Failed to obtain cargo metadata");
 

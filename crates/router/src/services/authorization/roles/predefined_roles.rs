@@ -189,6 +189,47 @@ pub static PREDEFINED_ROLES: LazyLock<HashMap<&'static str, RoleInfo>> = LazyLoc
         },
     );
 
+    // Collection dashboard roles never own connectors or routing configuration.
+    for (role_id, can_manage) in [
+        (consts::user_role::ROLE_ID_COLLECTION_MERCHANT_ADMIN, true),
+        (
+            consts::user_role::ROLE_ID_COLLECTION_MERCHANT_VIEW_ONLY,
+            false,
+        ),
+    ] {
+        let mut groups = vec![
+            PermissionGroup::OperationsView,
+            PermissionGroup::AnalyticsView,
+            PermissionGroup::AccountView,
+        ];
+        if can_manage {
+            groups.extend([
+                PermissionGroup::OperationsManage,
+                PermissionGroup::UsersView,
+                PermissionGroup::UsersManage,
+                PermissionGroup::ApiKeysView,
+                PermissionGroup::ApiKeysManage,
+                PermissionGroup::WebhooksView,
+                PermissionGroup::WebhooksManage,
+            ]);
+        }
+        roles.insert(
+            role_id,
+            RoleInfo {
+                role_id: role_id.to_string(),
+                role_name: role_id.to_string(),
+                groups,
+                scope: RoleScope::Merchant,
+                entity_type: EntityType::Merchant,
+                is_invitable: true,
+                is_deletable: true,
+                is_updatable: true,
+                is_internal: false,
+                product_type_filter: Some(MerchantProductType::Orchestration),
+            },
+        );
+    }
+
     // MERCHANT ROLES
     roles.insert(
         consts::user_role::ROLE_ID_MERCHANT_ADMIN,

@@ -10,6 +10,7 @@ use crate::{
     routes::app::SessionStateInfo,
 };
 
+pub mod collection;
 #[cfg(feature = "olap")]
 pub mod info;
 pub mod permission_groups;

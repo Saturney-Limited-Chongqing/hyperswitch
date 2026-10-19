@@ -2106,7 +2106,10 @@ mod tests {
         // Same inputs for all threads
         let event_type = enums::EventType::PaymentSucceeded;
         let event_class = enums::EventClass::Payments;
-        let primary_object_id = Arc::new("concurrent_payment_id".to_string());
+        let primary_object_id = Arc::new(format!(
+            "concurrent_payment_{}",
+            common_utils::generate_uuid_v4()
+        ));
         let primary_object_type = enums::EventObjectType::PaymentDetails;
         let payment_id = common_utils::id_type::PaymentId::try_from(std::borrow::Cow::Borrowed(
             "pay_mbabizu24mvu3mela5njyhpit10",
@@ -2289,7 +2292,8 @@ mod tests {
 
         for res in results {
             // Any task that panicked or returned Err will make the test fail here.
-            let _ = res.map_err(|e| format!("task panicked: {e}"))?;
+            let result = res.map_err(|e| format!("task panicked: {e}"))?;
+            result.map_err(|e| format!("webhook creation failed: {e}"))?;
         }
 
         // Collect all initial-attempt events for this payment

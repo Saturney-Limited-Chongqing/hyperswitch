@@ -45,12 +45,7 @@ pub async fn get_groups_and_resources_for_role_from_token(
         .get_permission_groups()
         .into_iter()
         .collect::<Vec<_>>();
-    let resources = groups
-        .iter()
-        .flat_map(|group| group.resources())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let resources = role_info.get_resources_set().into_iter().collect();
 
     Ok(ApplicationResponse::Json(role_api::GroupsAndResources {
         groups,
@@ -69,10 +64,16 @@ pub async fn get_parent_groups_info_for_role_from_token(
         .into_iter()
         .collect::<Vec<_>>();
 
-    let parent_groups = utils::user_role::permission_groups_to_parent_group_info(
+    let mut parent_groups = utils::user_role::permission_groups_to_parent_group_info(
         &groups,
         role_info.get_entity_type(),
     );
+    let resources = role_info.get_resources_set();
+    for group in &mut parent_groups {
+        group
+            .resources
+            .retain(|resource| resources.contains(resource));
+    }
 
     Ok(ApplicationResponse::Json(parent_groups))
 }
@@ -83,6 +84,15 @@ pub async fn create_role(
     req: role_api::CreateRoleRequest,
     _req_state: ReqState,
 ) -> UserResponse<role_api::RoleInfoWithGroupsResponse> {
+    if user_from_token
+        .get_role_info_from_db(&state)
+        .await?
+        .is_collection_merchant()
+    {
+        return Err(report!(UserErrors::InvalidRoleOperation))
+            .attach_printable("Collection merchants may assign predefined collection roles only");
+    }
+
     let now = common_utils::date_time::now();
 
     let user_entity_type = user_from_token
@@ -213,6 +223,15 @@ pub async fn create_role_v2(
     req: role_api::CreateRoleV2Request,
     _req_state: ReqState,
 ) -> UserResponse<role_api::RoleInfoResponseWithParentsGroup> {
+    if user_from_token
+        .get_role_info_from_db(&state)
+        .await?
+        .is_collection_merchant()
+    {
+        return Err(report!(UserErrors::InvalidRoleOperation))
+            .attach_printable("Collection merchants may assign predefined collection roles only");
+    }
+
     let now = common_utils::date_time::now();
 
     let user_entity_type = user_from_token
@@ -452,6 +471,15 @@ pub async fn update_role(
     req: role_api::UpdateRoleRequest,
     role_id: &str,
 ) -> UserResponse<role_api::RoleInfoWithGroupsResponse> {
+    if user_from_token
+        .get_role_info_from_db(&state)
+        .await?
+        .is_collection_merchant()
+    {
+        return Err(report!(UserErrors::InvalidRoleOperation))
+            .attach_printable("Collection merchants may assign predefined collection roles only");
+    }
+
     let role_name = req.role_name.map(RoleName::new).transpose()?;
 
     let role_info = roles::RoleInfo::from_role_id_in_lineage(
@@ -570,6 +598,7 @@ pub async fn list_roles_with_info(
         .get_role_info_from_db(&state)
         .await
         .attach_printable("Invalid role_id in JWT")?;
+    let requestor_role = user_role_info.clone();
 
     if user_role_info.is_internal() {
         return Err(UserErrors::InvalidRoleOperationWithMessage(
@@ -631,6 +660,7 @@ pub async fn list_roles_with_info(
         };
 
     role_info_vec.extend(custom_roles.into_iter().map(roles::RoleInfo::from));
+    role_info_vec.retain(|role| requestor_role.can_delegate_role(role));
 
     if let Some(entity_type) = request.entity_type {
         match entity_type {
@@ -748,11 +778,8 @@ pub async fn list_roles_at_entity_level(
     req: role_api::ListRolesAtEntityLevelRequest,
     check_type: role_api::RoleCheckType,
 ) -> UserResponse<Vec<role_api::MinimalRoleInfo>> {
-    let user_entity_type = user_from_token
-        .get_role_info_from_db(&state)
-        .await
-        .attach_printable("Invalid role_id in JWT")?
-        .get_entity_type();
+    let requestor_role = user_from_token.get_role_info_from_db(&state).await?;
+    let user_entity_type = requestor_role.get_entity_type();
 
     if req.entity_type > user_entity_type {
         return Err(UserErrors::InvalidRoleOperationWithMessage(
@@ -809,6 +836,7 @@ pub async fn list_roles_at_entity_level(
     };
 
     role_info_vec.extend(custom_roles.into_iter().map(roles::RoleInfo::from));
+    role_info_vec.retain(|role| requestor_role.can_delegate_role(role));
 
     match req.entity_type {
         EntityType::Tenant | EntityType::Organization => {}

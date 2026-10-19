@@ -155,8 +155,20 @@ impl DatabaseStore for ReplicaStore {
         _key_manager_state: Option<keymanager::KeyManagerState>,
         event_emitter: Arc<dyn ExternalServiceEventEmitter>,
     ) -> StorageResult<Self> {
-        let (master_config, replica_config, accounts_master_config, accounts_replica_config) =
-            config;
+        let (
+            mut master_config,
+            replica_config,
+            mut accounts_master_config,
+            accounts_replica_config,
+        ) = config;
+        if test_transaction {
+            // All reads in a rollback-only test must see writes from the same
+            // transaction. Multiple connections hold independent snapshots.
+            master_config.max_pool_size = 1;
+            master_config.min_idle_pool_size = 0;
+            accounts_master_config.max_pool_size = 1;
+            accounts_master_config.min_idle_pool_size = 0;
+        }
         let master_pool = diesel_make_pg_pool(
             &master_config,
             tenant_config.get_schema(),
@@ -177,6 +189,14 @@ impl DatabaseStore for ReplicaStore {
         )
         .await
         .attach_printable("failed to create accounts master pool")?;
+        if test_transaction {
+            return Ok(Self {
+                replica_pool: master_pool.clone(),
+                accounts_replica_pool: accounts_master_pool.clone(),
+                master_pool,
+                accounts_master_pool,
+            });
+        }
         let replica_pool = diesel_make_pg_pool(
             &replica_config,
             tenant_config.get_schema(),

@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use common_enums::{EntityType, MerchantProductType, PermissionGroup, Resource, RoleScope};
+use common_enums::{
+    EntityType, MerchantProductType, PermissionGroup, PermissionScope, Resource, RoleScope,
+};
 use common_utils::{errors::CustomResult, id_type};
 
 use super::{permission_groups::PermissionGroupExt, permissions::Permission};
@@ -23,6 +25,40 @@ pub struct RoleInfo {
 }
 
 impl RoleInfo {
+    pub fn is_collection_merchant(&self) -> bool {
+        matches!(
+            self.role_id.as_str(),
+            crate::consts::user_role::ROLE_ID_COLLECTION_MERCHANT_ADMIN
+                | crate::consts::user_role::ROLE_ID_COLLECTION_MERCHANT_VIEW_ONLY
+        )
+    }
+
+    /// Collection administrators may delegate only the collection dashboard roles.
+    /// Entity hierarchy alone is insufficient: the legacy merchant admin is at the
+    /// same entity level but can manage connectors and routing.
+    pub fn can_delegate_role(&self, target: &Self) -> bool {
+        !self.is_collection_merchant()
+            || (self.role_id == crate::consts::user_role::ROLE_ID_COLLECTION_MERCHANT_ADMIN
+                && target.is_collection_merchant())
+    }
+
+    fn collection_resource_allowed(resource: Resource) -> bool {
+        matches!(
+            resource,
+            Resource::Payment
+                | Resource::PaymentLink
+                | Resource::Refund
+                | Resource::Customer
+                | Resource::Dispute
+                | Resource::Report
+                | Resource::Analytics
+                | Resource::User
+                | Resource::ApiKey
+                | Resource::WebhookEvent
+                | Resource::Account
+        )
+    }
+
     pub fn get_role_id(&self) -> &str {
         &self.role_id
     }
@@ -35,6 +71,9 @@ impl RoleInfo {
         self.groups
             .iter()
             .flat_map(|group| group.accessible_groups())
+            .filter(|group| {
+                !self.is_collection_merchant() || *group != PermissionGroup::ConnectorsView
+            })
             .collect::<HashSet<_>>()
             .into_iter()
             .collect()
@@ -78,11 +117,21 @@ impl RoleInfo {
         self.get_permission_groups()
             .iter()
             .flat_map(|group| group.resources())
+            .filter(|resource| {
+                !self.is_collection_merchant() || Self::collection_resource_allowed(*resource)
+            })
             .collect()
     }
 
     pub fn check_permission_exists(&self, required_permission: Permission) -> bool {
-        required_permission.entity_type() <= self.entity_type
+        // OperationsManage also includes Account. Collection merchants must not
+        // obtain account administration through that inherited resource.
+        let collection_allowed = !self.is_collection_merchant()
+            || (Self::collection_resource_allowed(required_permission.resource())
+                && !(required_permission.resource() == Resource::Account
+                    && required_permission.scope() == PermissionScope::Write));
+        collection_allowed
+            && required_permission.entity_type() <= self.entity_type
             && self.get_permission_groups().iter().any(|group| {
                 required_permission.scope() <= group.scope()
                     && group.resources().contains(&required_permission.resource())
@@ -151,5 +200,95 @@ impl From<diesel_models::role::Role> for RoleInfo {
             is_internal: false,
             product_type_filter: role.merchant_product_type,
         }
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+    use crate::consts::user_role;
+
+    fn collection_admin() -> RoleInfo {
+        RoleInfo::from_predefined_roles(user_role::ROLE_ID_COLLECTION_MERCHANT_ADMIN)
+            .expect("collection role must exist")
+    }
+
+    #[test]
+    fn collection_admin_cannot_manage_platform_resources() {
+        let role = collection_admin();
+        assert_eq!(role.get_scope(), RoleScope::Merchant);
+        for permission in [
+            Permission::MerchantPaymentRead,
+            Permission::MerchantPaymentWrite,
+            Permission::MerchantRefundWrite,
+            Permission::MerchantUserWrite,
+            Permission::MerchantApiKeyWrite,
+        ] {
+            assert!(role.check_permission_exists(permission));
+        }
+        for permission in [
+            Permission::MerchantConnectorRead,
+            Permission::MerchantConnectorWrite,
+            Permission::ProfileConnectorRead,
+            Permission::ProfileConnectorWrite,
+            Permission::ProfileRoutingWrite,
+            Permission::MerchantRoutingRead,
+            Permission::MerchantRoutingWrite,
+            Permission::MerchantAccountWrite,
+            Permission::OrganizationAccountRead,
+            Permission::TenantAccountRead,
+            Permission::MerchantCloneConnectorWrite,
+        ] {
+            assert!(!role.check_permission_exists(permission));
+        }
+        for resource in [Resource::Connector, Resource::Routing, Resource::Payout] {
+            assert!(!role.get_resources_set().contains(&resource));
+        }
+        assert!(!role
+            .get_permission_groups()
+            .contains(&PermissionGroup::ConnectorsView));
+    }
+
+    #[test]
+    fn collection_viewer_has_no_write_or_delegation_access() {
+        let role =
+            RoleInfo::from_predefined_roles(user_role::ROLE_ID_COLLECTION_MERCHANT_VIEW_ONLY)
+                .expect("collection role must exist");
+        assert!(role.check_permission_exists(Permission::MerchantPaymentRead));
+        for permission in [
+            Permission::MerchantPaymentWrite,
+            Permission::MerchantRefundWrite,
+            Permission::MerchantUserWrite,
+            Permission::MerchantApiKeyWrite,
+        ] {
+            assert!(!role.check_permission_exists(permission));
+        }
+        assert!(!role.can_delegate_role(&collection_admin()));
+    }
+
+    #[test]
+    fn same_entity_level_does_not_allow_privilege_escalation() {
+        let admin = collection_admin();
+        let legacy_admin = RoleInfo::from_predefined_roles(user_role::ROLE_ID_MERCHANT_ADMIN)
+            .expect("legacy role must exist");
+        assert_eq!(admin.get_entity_type(), legacy_admin.get_entity_type());
+        assert!(!admin.can_delegate_role(&legacy_admin));
+        let mut custom_admin = legacy_admin.clone();
+        custom_admin.role_id = "role_custom_admin".to_owned();
+        assert!(!admin.can_delegate_role(&custom_admin));
+        assert!(admin.can_delegate_role(&admin));
+        // Existing platform administration continues to work.
+        let platform = RoleInfo::from_predefined_roles(common_utils::consts::ROLE_ID_TENANT_ADMIN)
+            .expect("platform role must exist");
+        assert!(platform.can_delegate_role(&admin));
+        assert!(platform.check_permission_exists(Permission::MerchantConnectorWrite));
+    }
+
+    #[test]
+    fn role_cache_round_trip_preserves_collection_policy() {
+        let cached = serde_json::to_string(&collection_admin()).expect("serialize role");
+        let role: RoleInfo = serde_json::from_str(&cached).expect("deserialize role");
+        assert!(!role.check_permission_exists(Permission::MerchantConnectorWrite));
+        assert!(!role.check_permission_exists(Permission::MerchantAccountWrite));
     }
 }

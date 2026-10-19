@@ -212,6 +212,8 @@ Merchant-facing UIs for configuring connectors, routing, and viewing transaction
 | **Role** | Full merchant dashboard. Connectors, routing rules, analytics, API keys. | Embeddable Hyperswitch components for partners and merchants surfacing Hyperswitch UI inside their own apps. |
 | **Depends on** | hyperswitch backend | hyperswitch backend |
 
+For platform-managed collection merchants, see the [dashboard access model and provisioning guide](docs/collection_merchant_dashboards.md).
+
 ### 3. Web checkout SDKs
 
 How a browser talks to Hyperswitch. [`hyperswitch-client-core`](https://github.com/juspay/hyperswitch-client-core) is the shared core, pulled in as a git submodule by every client SDK (web and mobile). [`hyperswitch-sdk-utils`](https://github.com/juspay/hyperswitch-sdk-utils) holds shared assets that merchants doing Headless Implementations consume directly.

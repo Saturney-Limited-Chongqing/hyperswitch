@@ -1,0 +1,747 @@
+diff --git a/package.json b/package.json
+index 7a2f751..ec36b55 100644
+--- a/package.json
++++ b/package.json
+@@ -32,7 +32,8 @@
+     "pw:coverage": "cross-env CI=1 PW_COVERAGE=1 playwright test",
+     "lint:hooks": "eslint src/ --max-warnings 0",
+     "lint:tests": "eslint playwright-tests/ --ext .ts --max-warnings 0",
+-    "lint:fix": "eslint src/ --fix && prettier --write \"src/**/*.{js,jsx,ts,tsx}\""
++    "lint:fix": "eslint src/ --fix && prettier --write \"src/**/*.{js,jsx,ts,tsx}\"",
++    "test:dashboard-access": "node --test tests/dashboard-access.test.mjs"
+   },
+   "devDependencies": {
+     "@eslint/create-config": "0.4.6",
+diff --git a/playwright-tests/collection/isolation.spec.ts b/playwright-tests/collection/isolation.spec.ts
+new file mode 100644
+index 0000000..51abf3f
+--- /dev/null
++++ b/playwright-tests/collection/isolation.spec.ts
+@@ -0,0 +1,132 @@
++import { test, expect } from "@playwright/test";
++import fs from "node:fs";
++
++type Merchant = {
++  merchant_id: string;
++  profile_id: string;
++  token: string;
++  platform_token: string;
++};
++const fixturePath = process.env.COLLECTION_TEST_FIXTURES;
++if (!fixturePath)
++  throw new Error(
++    "Set COLLECTION_TEST_FIXTURES to provisioned local test fixtures",
++  );
++const fixtures: { merchants: Merchant[] } = JSON.parse(
++  fs.readFileSync(fixturePath, "utf8"),
++);
++
++function managementPath(currentURL: string, destination: string) {
++  const current = new URL(currentURL);
++  current.pathname = current.pathname.replace(
++    /\/(?:v2\/)?home\/?$/,
++    destination,
++  );
++  if (current.pathname === new URL(currentURL).pathname) {
++    throw new Error(`Expected a home URL, received ${current.pathname}`);
++  }
++  return current.href;
++}
++
++test("two merchants receive distinct collection dashboards and cannot open administration", async ({
++  browser,
++  baseURL,
++}) => {
++  for (const [index, merchant] of fixtures.merchants.entries()) {
++    const other = fixtures.merchants[index === 0 ? 1 : 0];
++    const context = await browser.newContext();
++    await context.addInitScript((token) => {
++      if (!localStorage.getItem("USER_INFO")) {
++        localStorage.setItem("USER_INFO", JSON.stringify({ token }));
++      }
++    }, merchant.token);
++    const page = await context.newPage();
++    await page.goto(baseURL!);
++    await expect(page.getByTestId("collection-home")).toBeVisible({
++      timeout: 60000,
++    });
++    await expect(page.getByTestId("dashboard-identity")).toContainText(
++      "Merchant dashboard",
++    );
++    await expect(page.getByTestId("dashboard-identity")).toContainText(
++      merchant.merchant_id,
++    );
++    await expect(page.getByTestId("dashboard-identity")).not.toContainText(
++      other.merchant_id,
++    );
++    await expect(
++      page.getByText("Merchant management", { exact: true }),
++    ).toHaveCount(0);
++    await expect(page.getByText("Workflow", { exact: true })).toHaveCount(0);
++    await page.screenshot({
++      path: test.info().outputPath(`${merchant.merchant_id}-home.png`),
++    });
++    const home = page.url();
++    await page.goto(managementPath(home, "/customers"));
++    const ownLabel = index === 0 ? "A" : "B";
++    const otherLabel = index === 0 ? "B" : "A";
++    await expect(
++      page.getByText(`Merchant ${ownLabel} private customer`, { exact: true }),
++    ).toBeVisible({ timeout: 60000 });
++    await expect(
++      page.getByText(`Merchant ${otherLabel} private customer`, {
++        exact: true,
++      }),
++    ).toHaveCount(0);
++
++    for (const route of ["/connectors", "/routing", "/platform"]) {
++      await page.goto(managementPath(home, route));
++      await expect(
++        page.getByText("This page is managed by your platform administrator."),
++      ).toBeVisible({ timeout: 60000 });
++    }
++    await context.close();
++  }
++});
++
++test("platform administrator can see both merchants and open the management hub", async ({
++  browser,
++  baseURL,
++}) => {
++  const context = await browser.newContext();
++  await context.addInitScript((token) => {
++    if (!localStorage.getItem("USER_INFO")) {
++      localStorage.setItem("USER_INFO", JSON.stringify({ token }));
++    }
++  }, fixtures.merchants[0].platform_token);
++  const page = await context.newPage();
++  await page.goto(baseURL!);
++  await expect(page.getByTestId("dashboard-identity")).toContainText(
++    "Platform administration",
++    { timeout: 60000 },
++  );
++  await page.getByText("Merchant management", { exact: true }).click();
++  const hub = page.getByTestId("platform-management");
++  await expect(hub).toBeVisible();
++  for (const merchant of fixtures.merchants) {
++    await expect(
++      hub.getByText(merchant.merchant_id, { exact: true }),
++    ).toBeVisible();
++  }
++  const secondMerchant = fixtures.merchants[1];
++  const row = hub
++    .getByText(secondMerchant.merchant_id, { exact: true })
++    .locator("../..");
++  await row
++    .getByRole("button", { name: "Manage merchant", exact: true })
++    .click();
++  await expect(page.getByTestId("dashboard-identity")).toContainText(
++    secondMerchant.merchant_id,
++  );
++  await page.goto(managementPath(page.url(), "/connectors"));
++  await expect(
++    page.getByText("isolation_stripe_b", { exact: true }),
++  ).toBeVisible({ timeout: 60000 });
++  await expect(
++    page.getByText("isolation_stripe_a", { exact: true }),
++  ).toHaveCount(0);
++  await page.screenshot({
++    path: test.info().outputPath("platform-channels.png"),
++  });
++  await context.close();
++});
+diff --git a/playwright.collection.config.ts b/playwright.collection.config.ts
+new file mode 100644
+index 0000000..d816283
+--- /dev/null
++++ b/playwright.collection.config.ts
+@@ -0,0 +1,15 @@
++import { defineConfig } from "@playwright/test";
++
++export default defineConfig({
++  testDir: "./playwright-tests/collection",
++  workers: 1,
++  retries: 0,
++  timeout: 90000,
++  use: {
++    baseURL: process.env.COLLECTION_TEST_UI_URL || "http://127.0.0.1:19000",
++    viewport: { width: 1440, height: 1000 },
++    screenshot: "only-on-failure",
++    trace: "retain-on-failure",
++  },
++  reporter: [["list"]],
++});
+diff --git a/src/entryPoints/CollectionHome.res b/src/entryPoints/CollectionHome.res
+new file mode 100644
+index 0000000..fab0436
+--- /dev/null
++++ b/src/entryPoints/CollectionHome.res
+@@ -0,0 +1,32 @@
++@react.component
++let make = () => {
++  let {merchantId} = React.useContext(UserInfoProvider.defaultContext).getCommonSessionDetails()
++  let {userHasResourceAccess} = GroupACLHooks.useUserGroupACLHook()
++  let destinations: array<(string, string, UserManagementTypes.resourceAccessType)> = [
++    ("Payments", "/payments", Payment),
++    ("Refunds", "/refunds", Refund),
++    ("Customers", "/customers", Customer),
++    ("Payment analytics", "/analytics-payments", Analytics),
++  ]
++  <section dataTestId="collection-home" className="flex flex-col gap-5">
++    <h1 className="text-2xl font-semibold"> {"Your collections"->React.string} </h1>
++    <p className="text-nd_gray-500">
++      {`Manage payments and review activity for ${merchantId}. Payment channels are managed by your platform.`->React.string}
++    </p>
++    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
++      {destinations
++      ->Array.filter(((_, _, resource)) =>
++        userHasResourceAccess(~resourceAccess=resource) == CommonAuthTypes.Access
++      )
++      ->Array.map(((title, path, _)) =>
++        <button
++          key=path
++          className="border rounded-lg p-5 text-left font-semibold hover:bg-nd_gray-100"
++          onClick={_ => GlobalVars.appendDashboardPath(~url=path)->RescriptReactRouter.push}>
++          {title->React.string}
++        </button>
++      )
++      ->React.array}
++    </div>
++  </section>
++}
+diff --git a/src/entryPoints/DashboardAccess.res b/src/entryPoints/DashboardAccess.res
+new file mode 100644
+index 0000000..856d2a0
+--- /dev/null
++++ b/src/entryPoints/DashboardAccess.res
+@@ -0,0 +1,33 @@
++// Presentation policy only. The API remains the authority for every operation.
++let isCollectionRole = roleId =>
++  roleId == "collection_merchant_admin" || roleId == "collection_merchant_view_only"
++
++let isPlatformRole = roleId => roleId == "tenant_admin" || roleId == "internal_admin"
++
++let isCollectionPath = path =>
++  switch path {
++  | list{}
++  | list{"v2", "home"}
++  | list{"home", ..._}
++  | list{"payments", ..._}
++  | list{"refunds", ..._}
++  | list{"disputes", ..._}
++  | list{"customers", ..._}
++  | list{"payment-links", ..._}
++  | list{"developer-api-keys", ..._}
++  | list{"webhooks", ..._}
++  | list{"users", ..._}
++  | list{"analytics-payments", ..._}
++  | list{"analytics-refunds", ..._}
++  | list{"analytics-disputes", ..._}
++  | list{"account-settings", "profile", ..._}
++  | list{"unauthorized"} => true
++  | _ => false
++  }
++
++let canVisit = (roleId, path) => {
++  switch path {
++  | list{"platform", ..._} => isPlatformRole(roleId)
++  | _ => !isCollectionRole(roleId) || isCollectionPath(path)
++  }
++}
+diff --git a/src/entryPoints/DashboardPortal.res b/src/entryPoints/DashboardPortal.res
+new file mode 100644
+index 0000000..c41c3f1
+--- /dev/null
++++ b/src/entryPoints/DashboardPortal.res
+@@ -0,0 +1,20 @@
++@react.component
++let make = () => {
++  let {getResolvedUserInfo, getCommonSessionDetails} = React.useContext(
++    UserInfoProvider.defaultContext,
++  )
++  let {roleId} = getResolvedUserInfo()
++  let {merchantId} = getCommonSessionDetails()
++  let title = DashboardAccess.isCollectionRole(roleId)
++    ? "Merchant dashboard"
++    : DashboardAccess.isPlatformRole(roleId)
++    ? "Platform administration"
++    : "Control Center"
++
++  <div dataTestId="dashboard-identity" className="flex flex-col gap-1 border-b pb-3">
++    <span className="text-sm font-semibold"> {title->React.string} </span>
++    <span className="text-xs text-nd_gray-500">
++      {`Current merchant: ${merchantId}`->React.string}
++    </span>
++  </div>
++}
+diff --git a/src/entryPoints/HyperSwitchApp.res b/src/entryPoints/HyperSwitchApp.res
+index 4ddf539..f230495 100644
+--- a/src/entryPoints/HyperSwitchApp.res
++++ b/src/entryPoints/HyperSwitchApp.res
+@@ -25,7 +25,7 @@ let make = () => {
+     merchantDetailsValueAtom,
+   )
+   let featureFlagDetails = featureFlagAtom->Recoil.useRecoilValueFromAtom
+-  let (userGroupACL, setuserGroupACL) = Recoil.useRecoilState(userGroupACLAtom)
++  let setuserGroupACL = Recoil.useSetRecoilState(userGroupACLAtom)
+   let {getThemesJson} = React.useContext(ThemeProvider.themeContext)
+   let {fetchMerchantSpecificConfig} = MerchantSpecificConfigHook.useMerchantSpecificConfig()
+   let {fetchUserGroupACL, hasAnyGroupAccess, userHasAccess} = GroupACLHooks.useUserGroupACLHook()
+@@ -37,7 +37,11 @@ let make = () => {
+     UserInfoProvider.defaultContext,
+   )
+   let {roleId} = getResolvedUserInfo()
++  let isCollectionMerchant = DashboardAccess.isCollectionRole(roleId)
+   let {orgId, merchantId, profileId, version} = getCommonSessionDetails()
++  let sessionKey = `${orgId}:${merchantId}:${profileId}`
++  let (loadedSession, setLoadedSession) = React.useState(_ => "")
++  let sessionReady = loadedSession == sessionKey
+ 
+   let isInternalUser = roleId->HyperSwitchUtils.checkIsInternalUser
+   let {logoURL} = React.useContext(ThemeProvider.themeContext)
+@@ -56,7 +60,9 @@ let make = () => {
+     }
+   }
+ 
++  let captureSession = DashboardSessionGuard.useGuard()
+   let setUpDashboard = async () => {
++    let isCurrentSession = captureSession()
+     try {
+       // NOTE: Treat groupACL map similar to screenstate
+       setScreenState(_ => PageLoaderWrapper.Loading)
+@@ -93,10 +99,19 @@ let make = () => {
+         userGroupACLFetch,
+         merchantAccountFetch(),
+       ))
+-      setActiveProductValue(productType)
+-      setShowSideBar(_ => true)
++      if isCurrentSession() {
++        setActiveProductValue(productType)
++        setShowSideBar(_ => true)
++        setDashboardPageState(_ => #HOME)
++        setLoadedSession(_ => sessionKey)
++        setScreenState(_ => PageLoaderWrapper.Success)
++      }
+     } catch {
+-    | _ => setScreenState(_ => PageLoaderWrapper.Error("Failed to setup dashboard!"))
++    | _ =>
++      if isCurrentSession() {
++        setLoadedSession(_ => sessionKey)
++        setScreenState(_ => PageLoaderWrapper.Error("Failed to setup dashboard!"))
++      }
+     }
+   }
+ 
+@@ -110,13 +125,6 @@ let make = () => {
+     None
+   }, [themeId])
+ 
+-  React.useEffect(() => {
+-    if userGroupACL->Option.isSome {
+-      setDashboardPageState(_ => #HOME)
+-      setScreenState(_ => PageLoaderWrapper.Success)
+-    }
+-    None
+-  }, [userGroupACL])
+   let pageViewEvent = MixpanelHook.usePageView()
+   let path = url.path->List.toArray->Array.joinWith("/")
+ 
+@@ -155,13 +163,17 @@ let make = () => {
+           // TODO: Change the key to only profileId once the userInfo starts sending profileId
+           <div className={`h-screen flex flex-col`}>
+             <div className="flex relative  h-screen ">
+-              <RenderIf condition={screenState === Success}>
++              <RenderIf condition={sessionReady && screenState === Success}>
+                 <Sidebar
+-                  path=url.path sidebars={hyperSwitchAppSidebars} productSiebars=productSidebars
++                  path=url.path
++                  sidebars={hyperSwitchAppSidebars}
++                  productSiebars={isCollectionMerchant ? [] : productSidebars}
+                 />
+               </RenderIf>
+               <PageLoaderWrapper
+-                screenState={screenState} sectionHeight="!h-screen w-full" showLogoutButton=true>
++                screenState={sessionReady ? screenState : PageLoaderWrapper.Loading}
++                sectionHeight="!h-screen w-full"
++                showLogoutButton=true>
+                 <div
+                   className="flex relative flex-col flex-1 bg-hyperswitch_background dark:bg-black overflow-scroll md:overflow-x-hidden">
+                   <div className="w-full max-w-fixedPageWidth md:px-12 px-5 pt-3">
+@@ -250,8 +262,17 @@ let make = () => {
+                       className={isDecisionEngineWorkspace
+                         ? "flex flex-col min-h-full"
+                         : "p-6 md:px-12 md:py-8 flex flex-col gap-8 max-w-fixedPageWidth min-h-full"}>
+-                      <ErrorBoundary>
++                      <DashboardPortal />
++                      <ErrorBoundary key={`${orgId}:${merchantId}:${profileId}`}>
+                         {switch (activeProduct, url.path->urlPath) {
++                        | (_, path) if !DashboardAccess.canVisit(roleId, path) =>
++                          <UnauthorizedPage
++                            message="This page is managed by your platform administrator."
++                          />
++                        | (_, list{"platform"}) => <PlatformManagement />
++                        | (_, list{"home", ..._})
++                        | (_, list{"v2", "home"}) if isCollectionMerchant =>
++                          <CollectionHome />
+                         // /* DEFAULT HOME */
+                         | (_, list{"v2", "home"}) => <DefaultHome />
+ 
+diff --git a/src/entryPoints/PlatformManagement.res b/src/entryPoints/PlatformManagement.res
+new file mode 100644
+index 0000000..c8a4b87
+--- /dev/null
++++ b/src/entryPoints/PlatformManagement.res
+@@ -0,0 +1,50 @@
++@react.component
++let make = () => {
++  let merchants = Recoil.useRecoilValueFromAtom(HyperswitchAtom.merchantListAtom)
++  let {merchantId} = React.useContext(UserInfoProvider.defaultContext).getCommonSessionDetails()
++  let {setActiveProductValue} = React.useContext(ProductSelectionProvider.defaultContext)
++  let switchMerchant = OMPSwitchHooks.useInternalSwitch(~setActiveProductValue)
++  let (switching, setSwitching) = React.useState(_ => false)
++  let showToast = ToastAdapter.useShowToast()
++
++  let manageMerchant = async (merchant: OMPSwitchTypes.ompListTypes) => {
++    setSwitching(_ => true)
++    try {
++      let _ = await switchMerchant(
++        ~expectedMerchantId=Some(merchant.id),
++        ~version=merchant.version->Option.getOr(UserInfoTypes.V1),
++      )
++      GlobalVars.appendDashboardPath(~url="/home")->RescriptReactRouter.push
++    } catch {
++    | _ => showToast(~message="Unable to switch merchant", ~toastType=ToastError)
++    }
++    setSwitching(_ => false)
++  }
++
++  <section dataTestId="platform-management" className="flex flex-col gap-5">
++    <h1 className="text-2xl font-semibold"> {"Merchant management"->React.string} </h1>
++    <p className="text-nd_gray-500">
++      {"Select an authorized merchant to manage its channels, routing and transactions."->React.string}
++    </p>
++    <div className="border rounded-lg divide-y">
++      {merchants
++      ->Array.map(merchant =>
++        <div key={merchant.id} className="flex items-center justify-between p-4 gap-4">
++          <div className="flex flex-col gap-1">
++            <span className="font-semibold"> {merchant.name->React.string} </span>
++            <span className="text-sm text-nd_gray-500"> {merchant.id->React.string} </span>
++          </div>
++          <button
++            disabled=switching
++            className="border rounded px-4 py-2 disabled:opacity-50"
++            onClick={_ => manageMerchant(merchant)->ignore}>
++            {(
++              merchant.id == merchantId ? "Manage current merchant" : "Manage merchant"
++            )->React.string}
++          </button>
++        </div>
++      )
++      ->React.array}
++    </div>
++  </section>
++}
+diff --git a/src/entryPoints/SidebarHooks.res b/src/entryPoints/SidebarHooks.res
+index a656d0d..9dee783 100644
+--- a/src/entryPoints/SidebarHooks.res
++++ b/src/entryPoints/SidebarHooks.res
+@@ -298,5 +298,43 @@ let useGetSidebarValuesForCurrentActive = () => {
+   | OnBoarding(_)
+   | UnknownProduct => []
+   }
+-  defaultSidebar->Array.concat(sidebarValuesForProduct)
++  let {roleId} = React.useContext(UserInfoProvider.defaultContext).getResolvedUserInfo()
++  if DashboardAccess.isCollectionRole(roleId) {
++    [
++      Link({name: "Overview", icon: "nd-home", link: "/home", access: Access}),
++      Section({
++        name: "Collections",
++        icon: "nd-operations",
++        showSection: true,
++        links: [
++          payments(userHasResourceAccess),
++          refunds(userHasResourceAccess),
++          disputes(userHasResourceAccess),
++          customers(userHasResourceAccess),
++          paymentLinks(userHasResourceAccess),
++        ],
++      }),
++      Section({
++        name: "Reports",
++        icon: "nd-analytics",
++        showSection: true,
++        links: [paymentAnalytcis(~userHasResourceAccess)],
++      }),
++      Section({
++        name: "Developer settings",
++        icon: "nd-settings",
++        showSection: true,
++        links: [
++          apiKeys(userHasResourceAccess),
++          webhooks(userHasResourceAccess),
++          userManagement(userHasResourceAccess),
++        ],
++      }),
++    ]
++  } else {
++    let portalLinks = DashboardAccess.isPlatformRole(roleId)
++      ? [Link({name: "Merchant management", icon: "nd-user", link: "/platform", access: Access})]
++      : []
++    portalLinks->Array.concat(defaultSidebar)->Array.concat(sidebarValuesForProduct)
++  }
+ }
+diff --git a/src/hooks/DashboardSessionGuard.res b/src/hooks/DashboardSessionGuard.res
+new file mode 100644
+index 0000000..4ea50b2
+--- /dev/null
++++ b/src/hooks/DashboardSessionGuard.res
+@@ -0,0 +1,19 @@
++// Ignore responses issued under a previous merchant/profile or an unmounted page.
++let useGuard = () => {
++  let {orgId, merchantId, profileId, version} = React.useContext(
++    UserInfoProvider.defaultContext,
++  ).getCommonSessionDetails()
++  let versionName = version == UserInfoTypes.V1 ? "v1" : "v2"
++  let sessionKey = `${orgId}:${merchantId}:${profileId}:${versionName}`
++  let current = React.useRef(sessionKey)
++  let mounted = React.useRef(true)
++  current.current = sessionKey
++  React.useEffect(() => {
++    mounted.current = true
++    Some(() => mounted.current = false)
++  }, [])
++  () => {
++    let requestedSession = sessionKey
++    () => mounted.current && current.current == requestedSession
++  }
++}
+diff --git a/src/screens/OrchestrationHooks/GroupACLHooks.res b/src/screens/OrchestrationHooks/GroupACLHooks.res
+index c9f3c68..908f5ff 100644
+--- a/src/screens/OrchestrationHooks/GroupACLHooks.res
++++ b/src/screens/OrchestrationHooks/GroupACLHooks.res
+@@ -39,7 +39,9 @@ let useUserGroupACLHook = () => {
+   let setuserPermissionJson = Recoil.useSetRecoilState(userPermissionAtom)
+   let {isEmbeddableSession} = React.useContext(UserInfoProvider.defaultContext)
+ 
++  let captureSession = DashboardSessionGuard.useGuard()
+   let fetchUserGroupACL = async () => {
++    let isCurrentSession = captureSession()
+     try {
+       let url = getURL(~entityName=V1(USERS), ~userType=#GET_GROUP_ACL, ~methodType=Get)
+       let response = await fetchDetails(url)
+@@ -57,6 +59,9 @@ let useUserGroupACLHook = () => {
+         groups: userGroupACLMap,
+         resources: resourceACLMap,
+       }
++      if !isCurrentSession() {
++        Exn.raiseError("Dashboard session changed")
++      }
+       setuserGroupACL(_ => Some(accessMapping))
+ 
+       let permissionJson = groupsAccessValue->getGroupAccessJson
+diff --git a/src/screens/OrchestrationHooks/MerchantDetailsHook.res b/src/screens/OrchestrationHooks/MerchantDetailsHook.res
+index 24905d0..05cd20e 100644
+--- a/src/screens/OrchestrationHooks/MerchantDetailsHook.res
++++ b/src/screens/OrchestrationHooks/MerchantDetailsHook.res
+@@ -6,7 +6,9 @@ let useFetchUserMerchantDetails = () => {
+ 
+   let fetchDetails = useGetMethod()
+ 
++  let captureSession = DashboardSessionGuard.useGuard()
+   async (~version: UserInfoTypes.version=V1) => {
++    let isCurrentSession = captureSession()
+     try {
+       let merchantDetailsJSON = switch version {
+       | V1 => {
+@@ -24,6 +26,9 @@ let useFetchUserMerchantDetails = () => {
+       }
+       let (product_type, merchant_account_type) =
+         merchantDetailsJSON->MerchantAccountDetailsMapper.getUserMerchantDetails(~version)
++      if !isCurrentSession() {
++        Exn.raiseError("Dashboard session changed")
++      }
+       setMerchantDetailsValue(prev => {...prev, product_type, merchant_account_type})
+       product_type
+     } catch {
+@@ -41,7 +46,9 @@ let useFetchMerchantDetails = () => {
+ 
+   let fetchDetails = useGetMethod()
+ 
++  let captureSession = DashboardSessionGuard.useGuard()
+   async (~version: UserInfoTypes.version=V1) => {
++    let isCurrentSession = captureSession()
+     try {
+       let merchantDetailsJSON = switch version {
+       | V1 => {
+@@ -55,6 +62,9 @@ let useFetchMerchantDetails = () => {
+       }
+       let jsonToTypedValue =
+         merchantDetailsJSON->MerchantAccountDetailsMapper.getMerchantDetails(~version)
++      if !isCurrentSession() {
++        Exn.raiseError("Dashboard session changed")
++      }
+       setMerchantDetailsValue(_ => jsonToTypedValue)
+       jsonToTypedValue
+     } catch {
+diff --git a/src/screens/OrchestrationHooks/MerchantListHook.res b/src/screens/OrchestrationHooks/MerchantListHook.res
+index 88401fc..99a2fe8 100644
+--- a/src/screens/OrchestrationHooks/MerchantListHook.res
++++ b/src/screens/OrchestrationHooks/MerchantListHook.res
+@@ -33,8 +33,10 @@ let useFetchMerchantList = () => {
+   let {merchantId} = React.useContext(UserInfoProvider.defaultContext).getCommonSessionDetails()
+ 
+   let v2MerchantListFetcher = useFetchMerchantListV2()
++  let captureSession = DashboardSessionGuard.useGuard()
+ 
+   async () => {
++    let isCurrentSession = captureSession()
+     try {
+       let v1MerchantListUrl = getURL(
+         ~entityName=V1(USERS),
+@@ -47,9 +49,12 @@ let useFetchMerchantList = () => {
+       let concatenatedList = v1MerchantResponse->getArrayFromJson([])->Array.concat(v2MerchantList)
+       let response = concatenatedList->uniqueObjectFromArrayOfObjects(keyExtractorForMerchantid)
+       let concatenatedListTyped = response->getMappedValueFromArrayOfJson(merchantItemToObjMapper)
+-      setMerchantList(_ => concatenatedListTyped)
++      if isCurrentSession() {
++        setMerchantList(_ => concatenatedListTyped)
++      }
+     } catch {
+-    | _ => {
++    | _ =>
++      if isCurrentSession() {
+         setMerchantList(_ => [ompDefaultValue(merchantId, "")])
+         showToast(~message="Failed to fetch merchant list", ~toastType=ToastError)
+       }
+diff --git a/src/screens/OrchestrationHooks/MerchantSpecificConfigHook.res b/src/screens/OrchestrationHooks/MerchantSpecificConfigHook.res
+index a54e4f3..b8f355c 100644
+--- a/src/screens/OrchestrationHooks/MerchantSpecificConfigHook.res
++++ b/src/screens/OrchestrationHooks/MerchantSpecificConfigHook.res
+@@ -29,7 +29,9 @@ let useMerchantSpecificConfig = () => {
+     UserInfoProvider.defaultContext,
+   ).getCommonSessionDetails()
+ 
++  let captureSession = DashboardSessionGuard.useGuard()
+   let fetchMerchantSpecificConfig = async () => {
++    let isCurrentSession = captureSession()
+     try {
+       let domain = HSLocalStorage.getDomainfromStore()->Option.getOr("")
+       let merchantConfigURL = ` ${GlobalVars.getHostUrlWithBasePath}/config/merchant?domain=${domain}` // todo: domain shall be removed from query params later
+@@ -41,7 +43,9 @@ let useMerchantSpecificConfig = () => {
+         ]->LogicUtils.getJsonFromArrayOfJson
+       let response = await updateAPIHook(merchantConfigURL, body, Post)
+       let mapMerchantSpecificConfig = response->FeatureFlagUtils.merchantSpecificConfig
+-      setMerchantSpecificConfig(_ => mapMerchantSpecificConfig)
++      if isCurrentSession() {
++        setMerchantSpecificConfig(_ => mapMerchantSpecificConfig)
++      }
+     } catch {
+     | Exn.Error(e) => {
+         let err = Exn.message(e)->Option.getOr("Failed to Fetch!")
+diff --git a/src/screens/Sidebar/Sidebar.res b/src/screens/Sidebar/Sidebar.res
+index e15c182..16712b0 100644
+--- a/src/screens/Sidebar/Sidebar.res
++++ b/src/screens/Sidebar/Sidebar.res
+@@ -639,6 +639,11 @@ let make = (
+   let (exploredModules, unexploredModules) = useGetSidebarProductModules()
+   let {devModularityV2, devSidebarV2, devTheme, devUsers} =
+     HyperswitchAtom.featureFlagAtom->Recoil.useRecoilValueFromAtom
++  // The explicit platform/collection navigation must work with either sidebar flag.
++  let usePortalNavigation =
++    DashboardAccess.isCollectionRole(roleId) || DashboardAccess.isPlatformRole(roleId)
++  let devSidebarV2 = devSidebarV2 && !usePortalNavigation
++
+   let merchantList = Recoil.useRecoilValueFromAtom(HyperswitchAtom.merchantListAtom)
+   let (openItem, setOpenItem) = React.useState(_ => "")
+   let expandedSections = [activeProduct->getProductDisplayName]
+diff --git a/tests/dashboard-access.test.mjs b/tests/dashboard-access.test.mjs
+new file mode 100644
+index 0000000..1edd819
+--- /dev/null
++++ b/tests/dashboard-access.test.mjs
+@@ -0,0 +1,62 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import {
++  canVisit,
++  isCollectionRole,
++  isPlatformRole,
++} from "../src/entryPoints/DashboardAccess.res.js";
++
++const path = (value) =>
++  value
++    .split("/")
++    .filter(Boolean)
++    .reduceRight((tl, hd) => ({ hd, tl }), 0);
++
++for (const role of [
++  "collection_merchant_admin",
++  "collection_merchant_view_only",
++]) {
++  test(`${role}: collection pages remain accessible`, () => {
++    for (const url of [
++      "/home",
++      "/v2/home",
++      "/payments",
++      "/payments/payment_a",
++      "/refunds",
++      "/customers/customer_a",
++      "/developer-api-keys",
++      "/webhooks",
++      "/users",
++      "/analytics-payments",
++    ]) {
++      assert.equal(canVisit(role, path(url)), true, url);
++    }
++  });
++  test(`${role}: direct management paths are denied`, () => {
++    for (const url of [
++      "/platform",
++      "/connectors",
++      "/connectors/new",
++      "/routing",
++      "/routing-workspace",
++      "/payouts",
++      "/organization-chart",
++      "/organization-settings",
++      "/payment-settings",
++      "/configure-pmts",
++      "/superposition",
++      "/future-admin-page",
++    ]) {
++      assert.equal(canVisit(role, path(url)), false, url);
++    }
++  });
++}
++
++test("platform entry is restricted to platform administrators", () => {
++  assert.equal(isPlatformRole("tenant_admin"), true);
++  assert.equal(canVisit("tenant_admin", path("/platform")), true);
++  assert.equal(canVisit("tenant_admin", path("/connectors")), true);
++  assert.equal(canVisit("merchant_admin", path("/platform")), false);
++  assert.equal(isCollectionRole("merchant_admin"), false);
++  assert.equal(canVisit("merchant_admin", path("/connectors")), true);
++});
+diff --git a/webpack.dev.js b/webpack.dev.js
+index c81029a..121878f 100644
+--- a/webpack.dev.js
++++ b/webpack.dev.js
+@@ -5,7 +5,7 @@ const common = require("./webpack.common.js");
+ const config = import("./src/server/config.mjs");
+ const themeConfig = import("./src/server/theme.mjs");
+ 
+-let port = 9000;
++let port = Number(process.env.PORT || 9000);
+ // proxy is setup to make frontend and backend url same for local testing
+ let proxy = [
+   {
+@@ -22,7 +22,7 @@ let proxy = [
+   },
+   {
+     context: ["/api"],
+-    target: "http://localhost:8080",
++    target: process.env.API_PROXY_TARGET || "http://localhost:8080",
+     pathRewrite: { "^/api": "" },
+     changeOrigin: true,
+   },

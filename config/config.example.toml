@@ -1661,6 +1661,10 @@ cluster = "CLUSTER"         # value of CLUSTER from deployment
 version = "HOSTNAME"        # value of HOSTNAME from deployment which tells its version
 
 [platform]
+# Collection-only merchants: assign collection_merchant_admin / collection_merchant_view_only
+# and register their IDs here to restrict service API keys to collection operations.
+# Platform admin credentials retain channel management access.
+collection_merchant_ids = []
 enabled = true # Enable or disable platform features
 allow_connected_merchants = false # Enable or disable connected merchant account features
 
