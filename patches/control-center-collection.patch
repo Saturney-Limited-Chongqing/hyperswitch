@@ -14,10 +14,10 @@ index 7a2f751..ec36b55 100644
      "@eslint/create-config": "0.4.6",
 diff --git a/playwright-tests/collection/isolation.spec.ts b/playwright-tests/collection/isolation.spec.ts
 new file mode 100644
-index 0000000..51abf3f
+index 0000000..a410971
 --- /dev/null
 +++ b/playwright-tests/collection/isolation.spec.ts
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,134 @@
 +import { test, expect } from "@playwright/test";
 +import fs from "node:fs";
 +
@@ -86,7 +86,9 @@ index 0000000..51abf3f
 +    const ownLabel = index === 0 ? "A" : "B";
 +    const otherLabel = index === 0 ? "B" : "A";
 +    await expect(
-+      page.getByText(`Merchant ${ownLabel} private customer`, { exact: true }),
++      page
++        .getByText(`Merchant ${ownLabel} private customer`, { exact: true })
++        .first(),
 +    ).toBeVisible({ timeout: 60000 });
 +    await expect(
 +      page.getByText(`Merchant ${otherLabel} private customer`, {
@@ -171,6 +173,167 @@ index 0000000..d816283
 +  },
 +  reporter: [["list"]],
 +});
+diff --git a/src/APIUtils/APIUtils.res b/src/APIUtils/APIUtils.res
+index 9e792ae..6eb009c 100644
+--- a/src/APIUtils/APIUtils.res
++++ b/src/APIUtils/APIUtils.res
+@@ -2070,7 +2070,7 @@ let useGetMethod = (~showErrorToast=true) => {
+   }
+ }
+ 
+-let useUpdateMethod = (~showErrorToast=true) => {
++let useUpdateMethod = (~showErrorToast=true, ~includeCredentials=false) => {
+   let {merchantId, profileId} = React.useContext(
+     UserInfoProvider.defaultContext,
+   ).getCommonSessionDetails()
+@@ -2120,6 +2120,7 @@ let useUpdateMethod = (~showErrorToast=true) => {
+         ~contentType,
+         ~xFeatureRoute,
+         ~forceCookies,
++        ~includeCredentials,
+         ~sendV1DummyApiKeyHeader,
+         ~merchantId,
+         ~profileId,
+diff --git a/src/entryPoints/AuthModule/AuthWrapper.res b/src/entryPoints/AuthModule/AuthWrapper.res
+index b98a421..652d7a2 100644
+--- a/src/entryPoints/AuthModule/AuthWrapper.res
++++ b/src/entryPoints/AuthModule/AuthWrapper.res
+@@ -155,7 +155,10 @@ let make = (~children) => {
+     let authMethodType = method.auth_method.\"type"
+     let authMethodName = method.auth_method.name
+     switch (authMethodType, authMethodName) {
+-    | (OPEN_ID_CONNECT, #Okta) | (OPEN_ID_CONNECT, #Google) | (OPEN_ID_CONNECT, #Github) =>
++    | (OPEN_ID_CONNECT, #Rauthy)
++    | (OPEN_ID_CONNECT, #Okta)
++    | (OPEN_ID_CONNECT, #Google)
++    | (OPEN_ID_CONNECT, #Github) =>
+       <Button
+         text={`Continue with ${(authMethodName :> string)}`}
+         buttonType={PrimaryOutline}
+diff --git a/src/entryPoints/AuthModule/PreLoginModule/AuthSelect.res b/src/entryPoints/AuthModule/PreLoginModule/AuthSelect.res
+index 9c7446f..dbee767 100644
+--- a/src/entryPoints/AuthModule/PreLoginModule/AuthSelect.res
++++ b/src/entryPoints/AuthModule/PreLoginModule/AuthSelect.res
+@@ -61,7 +61,10 @@ let make = (~setSelectedAuthId) => {
+         customButtonStyle="!w-full"
+         onClick={_ => handleTerminateSSO(method.id)->ignore}
+       />
+-    | (OPEN_ID_CONNECT, #Okta) | (OPEN_ID_CONNECT, #Google) | (OPEN_ID_CONNECT, #Github) =>
++    | (OPEN_ID_CONNECT, #Rauthy)
++    | (OPEN_ID_CONNECT, #Okta)
++    | (OPEN_ID_CONNECT, #Google)
++    | (OPEN_ID_CONNECT, #Github) =>
+       <Button
+         text={`Login with ${(authMethodName :> string)}`}
+         buttonType={PrimaryOutline}
+diff --git a/src/entryPoints/AuthModule/SSOAuth/SSODecisionScreen.res b/src/entryPoints/AuthModule/SSOAuth/SSODecisionScreen.res
+index 8de9fc2..bb7477f 100644
+--- a/src/entryPoints/AuthModule/SSOAuth/SSODecisionScreen.res
++++ b/src/entryPoints/AuthModule/SSOAuth/SSODecisionScreen.res
+@@ -3,7 +3,11 @@ module SSOFromRedirect = {
+   let make = (~localSSOState) => {
+     open SSOTypes
+     open APIUtils
+-    let updateDetails = useUpdateMethod()
++    let includeCredentials = switch localSSOState {
++    | SSO_FROM_REDIRECT(#Rauthy(_)) => true
++    | _ => false
++    }
++    let updateDetails = useUpdateMethod(~includeCredentials)
+     let getURL = useGetURL()
+ 
+     let {setAuthStatus} = React.useContext(AuthInfoProvider.authStatusContext)
+@@ -12,7 +16,8 @@ module SSOFromRedirect = {
+       open AuthUtils
+       try {
+         let body = switch localSSOState {
+-        | SSO_FROM_REDIRECT(#Okta(data)) => data->Identity.genericTypeToJson
++        | SSO_FROM_REDIRECT(#Okta(data)) | SSO_FROM_REDIRECT(#Rauthy(data)) =>
++          data->Identity.genericTypeToJson
+         | _ => Dict.make()->JSON.Encode.object
+         }
+         let ssoUrl = getURL(~entityName=V1(USERS), ~userType=#SIGN_IN_WITH_SSO, ~methodType=Post)
+@@ -43,19 +48,20 @@ let make = (~auth_id: option<string>) => {
+   let path = url.path->List.toArray->Array.joinWith("/")
+   let (localSSOState, setLocalSSOState) = React.useState(_ => LOADING)
+ 
+-  let oktaMethod = () => {
++  let oidcMethod = provider => {
+     open LogicUtils
+     let dict = url.search->getDictFromUrlSearchParams
+     let okta = {
+       code: dict->Dict.get("code"),
+       state: dict->Dict.get("state"),
+     }
+-    setLocalSSOState(_ => SSO_FROM_REDIRECT(#Okta(okta)))
++    setLocalSSOState(_ => SSO_FROM_REDIRECT(provider == "rauthy" ? #Rauthy(okta) : #Okta(okta)))
+   }
+ 
+   React.useEffect(() => {
+     switch (url.path, auth_id) {
+-    | (list{"redirect", "oidc", "okta"}, _) => oktaMethod()
++    | (list{"redirect", "oidc", "okta"}, _) => oidcMethod("okta")
++    | (list{"redirect", "oidc", "rauthy"}, _) => oidcMethod("rauthy")
+     | (_, Some(str)) => Window.Location.replace(`${Window.env.apiBaseUrl}/user/auth/url?id=${str}`)
+     | _ => ()
+     }
+diff --git a/src/entryPoints/AuthModule/SSOAuth/SSOTypes.res b/src/entryPoints/AuthModule/SSOAuth/SSOTypes.res
+index 1da6e7c..b80ee80 100644
+--- a/src/entryPoints/AuthModule/SSOAuth/SSOTypes.res
++++ b/src/entryPoints/AuthModule/SSOAuth/SSOTypes.res
+@@ -1,13 +1,13 @@
+ type authMethodTypes = PASSWORD | MAGIC_LINK | OPEN_ID_CONNECT | INVALID
+ 
+-type authNameTypes = [#Magic_Link | #Password | #Okta | #Google | #Github]
++type authNameTypes = [#Magic_Link | #Password | #Okta | #Rauthy | #Google | #Github]
+ 
+ type okta = {
+   code: option<string>,
+   state: option<string>,
+ }
+ 
+-type redirectmethods = [#Okta(okta) | #Google | #Github]
++type redirectmethods = [#Okta(okta) | #Rauthy(okta) | #Google | #Github]
+ type ssoflowType = SSO_FROM_REDIRECT(redirectmethods) | LOADING
+ 
+ type authMethodType = {
+diff --git a/src/entryPoints/AuthModule/SSOAuth/SSOUtils.res b/src/entryPoints/AuthModule/SSOAuth/SSOUtils.res
+index 42f6c8e..8ed4306 100644
+--- a/src/entryPoints/AuthModule/SSOAuth/SSOUtils.res
++++ b/src/entryPoints/AuthModule/SSOAuth/SSOUtils.res
+@@ -5,6 +5,7 @@ let authMethodsNameToVariantMapper = value => {
+   | "password" => #Password
+   | "magic_link" => #Magic_Link
+   | "okta" => #Okta
++  | "rauthy" => #Rauthy
+   | "google" => #Google
+   | "github" => #Github
+   | _ => #Password
+diff --git a/src/entryPoints/AuthModule/UserInfoScreen.res b/src/entryPoints/AuthModule/UserInfoScreen.res
+index 6075ecb..5d84b7f 100644
+--- a/src/entryPoints/AuthModule/UserInfoScreen.res
++++ b/src/entryPoints/AuthModule/UserInfoScreen.res
+@@ -1,5 +1,6 @@
+ @react.component
+ let make = (~onClick) => {
++  let url = RescriptReactRouter.useUrl()
+   let (errorMessage, setErrorMessage) = React.useState(_ => "")
+   let (screenState, setScreenState) = React.useState(_ => PageLoaderWrapper.Loading)
+   let {setAuthStatus, authStatus} = React.useContext(AuthInfoProvider.authStatusContext)
+@@ -14,6 +15,13 @@ let make = (~onClick) => {
+       let info = AuthUtils.getAuthInfo(dict->JSON.Encode.object)
+ 
+       setAuthStatus(LoggedIn(Auth(info)))
++      // The callback is an authentication route, not a merchant dashboard page.
++      switch (url.path, url.path->HSwitchUtils.urlPath) {
++      | (list{"redirect", "oidc", _}, _)
++      | (_, list{"redirect", "oidc", _}) =>
++        RescriptReactRouter.replace(GlobalVars.appendDashboardPath(~url="/home"))
++      | _ => ()
++      }
+       removeItemFromLocalStorage(~key="PRE_LOGIN_INFO")
+       removeItemFromLocalStorage(~key="email_token")
+       removeItemFromLocalStorage(~key="code")
 diff --git a/src/entryPoints/CollectionHome.res b/src/entryPoints/CollectionHome.res
 new file mode 100644
 index 0000000..fab0436
@@ -491,6 +654,27 @@ index a656d0d..9dee783 100644
 +    portalLinks->Array.concat(defaultSidebar)->Array.concat(sidebarValuesForProduct)
 +  }
  }
+diff --git a/src/hooks/AuthHooks.res b/src/hooks/AuthHooks.res
+index e7851f6..70858d8 100644
+--- a/src/hooks/AuthHooks.res
++++ b/src/hooks/AuthHooks.res
+@@ -123,6 +123,7 @@ let useApiFetcher = () => {
+       ~contentType=Headers("application/json"),
+       ~xFeatureRoute,
+       ~forceCookies,
++      ~includeCredentials=false,
+       ~sendV1DummyApiKeyHeader=false,
+       ~merchantId="",
+       ~profileId="",
+@@ -166,7 +167,7 @@ let useApiFetcher = () => {
+           Fetch.RequestInit.make(
+             ~method_,
+             ~body?,
+-            ~credentials={forceCookies ? SameOrigin : Omit},
++            ~credentials={includeCredentials ? Include : forceCookies ? SameOrigin : Omit},
+             ~headers=getHeaders(
+               ~headers,
+               ~uri,
 diff --git a/src/hooks/DashboardSessionGuard.res b/src/hooks/DashboardSessionGuard.res
 new file mode 100644
 index 0000000..4ea50b2
@@ -745,3 +929,174 @@ index c81029a..121878f 100644
      pathRewrite: { "^/api": "" },
      changeOrigin: true,
    },
+diff --git a/playwright-tests/collection/rauthy.spec.ts b/playwright-tests/collection/rauthy.spec.ts
+new file mode 100644
+index 0000000..a452fa2
+--- /dev/null
++++ b/playwright-tests/collection/rauthy.spec.ts
+@@ -0,0 +1,165 @@
++import { test, expect, type Page } from "@playwright/test";
++import fs from "node:fs";
++
++type Identity = {
++  email: string;
++  password: string;
++  role_id: string;
++  merchant_id?: string;
++};
++type Fixtures = {
++  auth_id: string;
++  api_url: string;
++  users: Identity[];
++  unbound: Identity;
++};
++const path = process.env.RAUTHY_TEST_FIXTURES;
++const fixtures: Fixtures | undefined = path
++  ? JSON.parse(fs.readFileSync(path, "utf8"))
++  : undefined;
++
++test.describe("Rauthy OIDC", () => {
++  test.skip(
++    !fixtures,
++    "Set RAUTHY_TEST_FIXTURES for the dedicated remote Rauthy instance",
++  );
++  test.setTimeout(120000);
++
++  async function authenticate(page: Page, user: Identity, baseURL: string) {
++    await page.goto(
++      `${baseURL}/?auth_id=${encodeURIComponent(fixtures!.auth_id)}`,
++    );
++    await page
++      .getByRole("button", { name: "Continue with Rauthy", exact: true })
++      .click();
++    await page.waitForURL(/localhost:18090\/auth\/v1\/oidc\/authorize/);
++    const authorization = new URL(page.url());
++    expect(authorization.searchParams.get("code_challenge_method")).toBe(
++      "S256",
++    );
++    expect(authorization.searchParams.get("nonce")).toBeTruthy();
++    await page.waitForLoadState("networkidle");
++    await page.locator('input[type="email"]').fill(user.email);
++    await page.locator('input[type="email"]').press("Tab");
++    await page
++      .locator("button:visible")
++      .filter({ hasText: /^Login$/ })
++      .first()
++      .click();
++    await page.locator('input[type="password"]:visible').fill(user.password);
++    await page.locator('input[type="password"]:visible').press("Tab");
++    const response = page.waitForResponse((r) =>
++      new URL(r.url()).pathname.endsWith("/user/oidc"),
++    );
++    await page
++      .locator("button:visible")
++      .filter({ hasText: /^Login$/ })
++      .first()
++      .click();
++    return response;
++  }
++
++  for (const index of [0, 1, 2]) {
++    test(`bound identity ${index} receives only its local dashboard role`, async ({
++      page,
++      baseURL,
++      request,
++    }) => {
++      const user = fixtures!.users[index];
++      let callback: { code: string | null; state: string | null } | undefined;
++      page.on("request", (r) => {
++        const url = new URL(r.url());
++        if (url.pathname === "/redirect/oidc/rauthy")
++          callback = {
++            code: url.searchParams.get("code"),
++            state: url.searchParams.get("state"),
++          };
++      });
++      // An otherwise valid callback cannot be used from another browser.
++      await page.route("**/redirect/oidc/rauthy?**", async (route) => {
++        const url = new URL(route.request().url());
++        const foreign = await request.post(`${fixtures!.api_url}/user/oidc`, {
++          data: {
++            code: url.searchParams.get("code"),
++            state: url.searchParams.get("state"),
++          },
++        });
++        expect(foreign.status()).toBe(400);
++        expect((await foreign.json()).token).toBeUndefined();
++        await route.continue();
++      });
++      const response = await authenticate(page, user, baseURL!);
++      expect(response.status()).toBe(200);
++      const tokenResponse = await response.json();
++      expect(tokenResponse.token_type).toBe("user_info");
++      const info = await request.get(`${fixtures!.api_url}/user`, {
++        headers: { Authorization: `Bearer ${tokenResponse.token}` },
++      });
++      expect(info.status()).toBe(200);
++      expect((await info.json()).role_id).toBe(user.role_id);
++      await expect(page).toHaveURL(/\/(?:v2\/)?home\/?$/);
++      if (user.merchant_id) {
++        await expect(page.getByTestId("collection-home")).toBeVisible({
++          timeout: 60000,
++        });
++        await expect(page.getByTestId("dashboard-identity")).toContainText(
++          user.merchant_id,
++        );
++        const home = new URL(page.url());
++        home.pathname = home.pathname.replace(
++          /\/(?:v2\/)?home\/?$/,
++          "/platform",
++        );
++        await page.goto(home.href);
++        await expect(
++          page.getByText(
++            "This page is managed by your platform administrator.",
++          ),
++        ).toBeVisible();
++        const other =
++          user.merchant_id === "collection_a" ? "collection_b" : "collection_a";
++        const cross = await request.get(
++          `${fixtures!.api_url}/accounts/${other}`,
++          { headers: { Authorization: `Bearer ${tokenResponse.token}` } },
++        );
++        expect(cross.status()).toBeGreaterThanOrEqual(400);
++        expect(cross.status()).toBeLessThan(500);
++      } else {
++        await expect(page.getByTestId("dashboard-identity")).toContainText(
++          "Platform administration",
++          { timeout: 60000 },
++        );
++      }
++      // A successful callback consumes its nonce: the same code/state cannot sign in again.
++      expect(callback).toBeTruthy();
++      const replay = await page.request.post(`${fixtures!.api_url}/user/oidc`, {
++        data: callback,
++      });
++      expect(replay.status()).toBe(400);
++    });
++  }
++
++  test("same-email local account without an explicit subject binding is rejected", async ({
++    page,
++    baseURL,
++  }) => {
++    const response = await authenticate(page, fixtures!.unbound, baseURL!);
++    expect(response.status()).toBe(400);
++    const body = await response.json();
++    expect(body.token).toBeUndefined();
++    await expect(page.getByTestId("dashboard-identity")).toHaveCount(0);
++  });
++
++  test("unknown state cannot create a dashboard session", async ({
++    request,
++  }) => {
++    const response = await request.post(`${fixtures!.api_url}/user/oidc`, {
++      data: {
++        state: "not-a-real-authorization-state",
++        code: "not-a-real-code",
++      },
++    });
++    expect(response.status()).toBe(400);
++    expect((await response.json()).token).toBeUndefined();
++  });
++});

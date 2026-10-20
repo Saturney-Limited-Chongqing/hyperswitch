@@ -3049,17 +3049,38 @@ pub async fn get_sso_auth_url(
     let redirect_url =
         utils::user::get_oidc_sso_redirect_url(&state, &open_id_public_config.name.to_string());
 
+    let browser_cookie = if open_id_public_config.name == user_api::OpenIdProvider::Rauthy {
+        let secure = state.conf.user.base_url.starts_with("https://");
+        let name = if secure {
+            consts::user::RAUTHY_STATE_COOKIE_SECURE
+        } else {
+            consts::user::RAUTHY_STATE_COOKIE
+        };
+        Some(format!(
+            "{name}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
+            oidc_state.peek(),
+            consts::user::REDIS_SSO_TTL,
+            if secure { "; Secure" } else { "" }
+        ))
+    } else {
+        None
+    };
+
     openidconnect::get_authorization_url(
         state,
         redirect_url,
         oidc_state,
         open_id_private_config.base_url.into(),
         open_id_private_config.client_id,
+        open_id_public_config.name == user_api::OpenIdProvider::Rauthy,
     )
     .await
     .map(|url| {
         ApplicationResponse::JsonForRedirection(RedirectionResponse {
-            headers: Vec::with_capacity(0),
+            headers: browser_cookie
+                .into_iter()
+                .map(|value| ("Set-Cookie".to_owned(), value))
+                .collect(),
             return_url: String::new(),
             http_method: String::new(),
             params: Vec::with_capacity(0),
@@ -3072,6 +3093,7 @@ pub async fn sso_sign(
     state: SessionState,
     request: user_api::SsoSignInRequest,
     user_from_single_purpose_token: Option<auth::UserFromSinglePurposeToken>,
+    browser_state: Option<(String, String)>,
 ) -> UserResponse<user_api::TokenResponse> {
     let authentication_method_id =
         utils::user::get_sso_id_from_redis(&state, request.state.clone()).await?;
@@ -3100,7 +3122,21 @@ pub async fn sso_sign(
 
     let redirect_url =
         utils::user::get_oidc_sso_redirect_url(&state, &open_id_public_config.name.to_string());
-    let email = openidconnect::get_user_email_from_oidc_provider(
+    let is_rauthy = open_id_public_config.name == user_api::OpenIdProvider::Rauthy;
+    if is_rauthy {
+        let name = if state.conf.user.base_url.starts_with("https://") {
+            consts::user::RAUTHY_STATE_COOKIE_SECURE
+        } else {
+            consts::user::RAUTHY_STATE_COOKIE
+        };
+        if !browser_state.as_ref().is_some_and(|(cookie_name, value)| {
+            cookie_name == name && value == request.state.peek()
+        }) {
+            return Err(UserErrors::SSOFailed.into());
+        }
+    }
+    let subject_bindings = open_id_private_config.subject_bindings.clone();
+    let identity = openidconnect::get_identity_from_oidc_provider(
         &state,
         redirect_url,
         request.state,
@@ -3108,8 +3144,13 @@ pub async fn sso_sign(
         open_id_private_config.client_id,
         request.code,
         open_id_private_config.client_secret,
+        is_rauthy,
     )
     .await?;
+    let email = identity.email;
+    if is_rauthy && email.extract_domain()? != user_authentication_method.email_domain {
+        return Err(UserErrors::SSOFailed.into());
+    }
 
     utils::user::validate_email_domain_auth_type_using_db(
         &state,
@@ -3118,13 +3159,28 @@ pub async fn sso_sign(
     )
     .await?;
 
-    // TODO: Use config to handle not found error
-    let user_from_db: domain::UserFromStorage = state
-        .global_store
-        .find_active_user_by_user_email(&email)
-        .await
-        .map(Into::into)
-        .to_not_found_response(UserErrors::UserNotFound)?;
+    // Rauthy identities are explicitly bound by an administrator, never linked
+    // to an existing privileged account merely because the email matches.
+    let user_from_db: domain::UserFromStorage = if is_rauthy {
+        let user_id = subject_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.get(&identity.subject))
+            .filter(|id| !id.is_empty())
+            .ok_or(UserErrors::SSOFailed)?;
+        state
+            .global_store
+            .find_active_user_by_user_id(user_id)
+            .await
+            .to_not_found_response(UserErrors::UserNotFound)?
+            .into()
+    } else {
+        state
+            .global_store
+            .find_active_user_by_user_email(&email)
+            .await
+            .to_not_found_response(UserErrors::UserNotFound)?
+            .into()
+    };
 
     if !user_from_db.is_verified() {
         state

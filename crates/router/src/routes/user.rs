@@ -875,13 +875,17 @@ pub async fn sso_sign(
 ) -> HttpResponse {
     let flow = Flow::SignInWithSso;
     let payload = json_payload.into_inner();
+    let browser_state = req
+        .cookie(crate::consts::user::RAUTHY_STATE_COOKIE_SECURE)
+        .or_else(|| req.cookie(crate::consts::user::RAUTHY_STATE_COOKIE))
+        .map(|cookie| (cookie.name().to_owned(), cookie.value().to_owned()));
     Box::pin(api::server_wrap(
         flow,
         state.clone(),
         &req,
         payload,
         |state, user: Option<auth::UserFromSinglePurposeToken>, payload, _| {
-            user_core::sso_sign(state, payload, user)
+            user_core::sso_sign(state, payload, user, browser_state.clone())
         },
         auth::auth_type(
             &auth::NoAuth,

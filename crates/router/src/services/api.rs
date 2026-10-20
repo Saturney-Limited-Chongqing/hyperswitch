@@ -505,7 +505,29 @@ where
         }
         Ok(ApplicationResponse::JsonForRedirection(response)) => {
             match serde_json::to_string(&response) {
-                Ok(res) => http_redirect_response(res, response),
+                Ok(res) => {
+                    // Only the SSO auth-url flow may attach its browser-state
+                    // cookie. Do not forward connector redirection headers.
+                    #[cfg(feature = "v1")]
+                    let headers = if flow.to_string() == "GetSsoAuthUrl" {
+                        response.headers.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    #[cfg(not(feature = "v1"))]
+                    let headers: Vec<(String, String)> = Vec::new();
+                    let mut redirect = http_redirect_response(res, response);
+                    for (name, value) in headers {
+                        if name.eq_ignore_ascii_case("set-cookie") {
+                            if let Ok(value) = HeaderValue::from_str(&value) {
+                                redirect
+                                    .headers_mut()
+                                    .append(actix_web::http::header::SET_COOKIE, value);
+                            }
+                        }
+                    }
+                    redirect
+                }
                 Err(_) => http_response_err(
                     r#"{
                     "error": {

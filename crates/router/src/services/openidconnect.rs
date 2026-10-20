@@ -1,7 +1,7 @@
 use common_utils::errors::ErrorSwitch;
 use error_stack::ResultExt;
 use external_services::http_client::client;
-use hyperswitch_masking::{ExposeInterface, Secret};
+use hyperswitch_masking::{ExposeInterface, PeekInterface, Secret};
 use oidc::TokenResponse;
 use openidconnect::{self as oidc, core as oidc_core};
 use redis_interface::RedisConnectionWithContext;
@@ -20,31 +20,55 @@ pub async fn get_authorization_url(
     redirect_state: Secret<String>,
     base_url: Secret<String>,
     client_id: Secret<String>,
+    use_pkce: bool,
 ) -> UserResult<url::Url> {
     let discovery_document = get_discovery_document(base_url, &state).await?;
 
-    let (auth_url, csrf_token, nonce) =
-        get_oidc_core_client(discovery_document, client_id, None, redirect_url)?
-            .authorize_url(
-                oidc_core::CoreAuthenticationFlow::AuthorizationCode,
-                || oidc::CsrfToken::new(redirect_state.expose()),
-                oidc::Nonce::new_random,
-            )
-            .add_scope(oidc::Scope::new("email".to_string()))
-            .url();
+    let pkce = use_pkce.then(oidc::PkceCodeChallenge::new_random_sha256);
+    let client = get_oidc_core_client(discovery_document, client_id, None, redirect_url)?;
+    let mut authorization = client
+        .authorize_url(
+            oidc_core::CoreAuthenticationFlow::AuthorizationCode,
+            || oidc::CsrfToken::new(redirect_state.expose()),
+            oidc::Nonce::new_random,
+        )
+        .add_scope(oidc::Scope::new("email".to_string()));
+    if let Some((challenge, _)) = &pkce {
+        authorization = authorization.set_pkce_challenge(challenge.clone());
+    }
+    let (auth_url, csrf_token, nonce) = authorization.url();
 
     // Save csrf & nonce as key value respectively
     let key = get_oidc_redis_key(csrf_token.secret());
     get_redis_connection_for_global_tenant(&state)?
-        .set_key_with_expiry(&key.into(), nonce.secret(), consts::user::REDIS_SSO_TTL)
+        .set_key_with_expiry(
+            &key.clone().into(),
+            nonce.secret(),
+            consts::user::REDIS_SSO_TTL,
+        )
         .await
         .change_context(UserErrors::InternalServerError)
         .attach_printable("Failed to save csrf-nonce in redis")?;
 
+    if let Some((_, verifier)) = pkce {
+        get_redis_connection_for_global_tenant(&state)?
+            .set_key_with_expiry(
+                &format!("{key}_PKCE").into(),
+                verifier.secret(),
+                consts::user::REDIS_SSO_TTL,
+            )
+            .await
+            .change_context(UserErrors::InternalServerError)?;
+    }
     Ok(auth_url)
 }
 
-pub async fn get_user_email_from_oidc_provider(
+pub struct OidcIdentity {
+    pub email: UserEmail,
+    pub subject: String,
+}
+
+pub async fn get_identity_from_oidc_provider(
     state: &SessionState,
     redirect_url: String,
     redirect_state: Secret<String>,
@@ -52,7 +76,8 @@ pub async fn get_user_email_from_oidc_provider(
     client_id: Secret<String>,
     authorization_code: Secret<String>,
     client_secret: Secret<String>,
-) -> UserResult<UserEmail> {
+    require_verified_identity: bool,
+) -> UserResult<OidcIdentity> {
     let nonce = get_nonce_from_redis(state, &redirect_state).await?;
     let discovery_document = get_discovery_document(base_url, state).await?;
     let client = get_oidc_core_client(
@@ -62,18 +87,19 @@ pub async fn get_user_email_from_oidc_provider(
         redirect_url,
     )?;
 
-    let nonce_clone = nonce.clone();
-    client
-        .authorize_url(
-            oidc_core::CoreAuthenticationFlow::AuthorizationCode,
-            || oidc::CsrfToken::new(redirect_state.expose()),
-            || nonce_clone,
-        )
-        .add_scope(oidc::Scope::new("email".to_string()));
-
     // Send request to OpenId provider with authorization code
-    let token_response = client
-        .exchange_code(oidc::AuthorizationCode::new(authorization_code.expose()))
+    let key = get_oidc_redis_key(redirect_state.peek());
+    let mut exchange =
+        client.exchange_code(oidc::AuthorizationCode::new(authorization_code.expose()));
+    if require_verified_identity {
+        let verifier = get_redis_connection_for_global_tenant(state)?
+            .get_key::<Option<String>>(&format!("{key}_PKCE").into())
+            .await
+            .change_context(UserErrors::InternalServerError)?
+            .ok_or(UserErrors::SSOFailed)?;
+        exchange = exchange.set_pkce_verifier(oidc::PkceCodeVerifier::new(verifier));
+    }
+    let token_response = exchange
         .request_async(|req| get_oidc_reqwest_client(state, req))
         .await
         .map_err(|e| match e {
@@ -98,6 +124,10 @@ pub async fn get_user_email_from_oidc_provider(
         .change_context(UserErrors::InternalServerError)
         .attach_printable("Failed to verify id token")?;
 
+    if require_verified_identity && id_token_claims.email_verified() != Some(true) {
+        return Err(UserErrors::SSOFailed.into());
+    }
+
     // Get email from token
     let email_from_token = id_token_claims
         .email()
@@ -105,9 +135,22 @@ pub async fn get_user_email_from_oidc_provider(
         .ok_or(UserErrors::InternalServerError)
         .attach_printable("OpenID Provider Didnt provide email")?;
 
-    UserEmail::new(Secret::new(email_from_token))
+    let email = UserEmail::new(Secret::new(email_from_token))
         .change_context(UserErrors::InternalServerError)
-        .attach_printable("Failed to create email type")
+        .attach_printable("Failed to create email type")?;
+    let connection = get_redis_connection_for_global_tenant(state)?;
+    connection
+        .delete_key(&key.into())
+        .await
+        .change_context(UserErrors::InternalServerError)?;
+    connection
+        .delete_key(&format!("{}_PKCE", get_oidc_redis_key(redirect_state.peek())).into())
+        .await
+        .change_context(UserErrors::InternalServerError)?;
+    Ok(OidcIdentity {
+        email,
+        subject: id_token_claims.subject().as_str().to_owned(),
+    })
 }
 
 // TODO: Cache Discovery Document

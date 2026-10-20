@@ -42,3 +42,7 @@ pub const REDIS_THEME_CONFIG_VERSION_TTL_IN_SECS: i64 = 7 * 24 * 60 * 60; // 7 d
 pub const DEFAULT_PROFILE_NAME: &str = "default";
 pub const DEFAULT_PRODUCT_TYPE: common_enums::MerchantProductType =
     common_enums::MerchantProductType::Orchestration;
+
+/// Browser binding for Rauthy authorization-code callbacks.
+pub const RAUTHY_STATE_COOKIE: &str = "hs_rauthy_state";
+pub const RAUTHY_STATE_COOKIE_SECURE: &str = "__Host-hs_rauthy_state";

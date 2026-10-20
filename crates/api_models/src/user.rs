@@ -327,6 +327,9 @@ pub struct OpenIdConnectPrivateConfig {
     pub client_id: Secret<String>,
     pub client_secret: Secret<String>,
     pub private_key: Option<Secret<String>>,
+    /// Rauthy subject -> existing local user ID. Managed only by administrators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_bindings: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
@@ -341,6 +344,7 @@ pub struct OpenIdConnectPublicConfig {
 #[strum(serialize_all = "snake_case")]
 pub enum OpenIdProvider {
     Okta,
+    Rauthy,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]

@@ -276,3 +276,5 @@ Check the [CHANGELOG.md](./CHANGELOG.md) file for details.
 </a>
 
 This product is licensed under the [Apache 2.0 License](LICENSE).
+
+For Rauthy OIDC dashboard login, see [Rauthy SSO](docs/rauthy_sso.md).
