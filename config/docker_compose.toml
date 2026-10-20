@@ -1536,6 +1536,8 @@ primary_color = "#006DF9"                                                       
 background_color = "#FFFFFF"                                                     # Email background color
 
 [platform]
+# Apply channel_daily_limits migration before enabling the V1 payment quota guard.
+channel_daily_limits_enabled = false
 # Collection-only merchants: assign collection_merchant_admin / collection_merchant_view_only
 # and register their IDs here to restrict service API keys to collection operations.
 # Platform admin credentials retain channel management access.

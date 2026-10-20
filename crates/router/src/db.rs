@@ -10,6 +10,7 @@ pub mod business_profile;
 pub mod callback_mapper;
 pub mod capture;
 pub mod card_issuer;
+pub mod channel_limits;
 pub mod configs;
 pub mod customers;
 pub mod dashboard_metadata;
@@ -147,6 +148,7 @@ pub trait StorageInterface:
     + unified_translations::UnifiedTranslationsInterface
     + authorization::AuthorizationInterface
     + user::sample_data::BatchSampleDataInterface
+    + channel_limits::ChannelLimitInterface
     + health_check::HealthCheckDbInterface
     + user_authentication_method::UserAuthenticationMethodInterface
     + AuthenticationInterface<Error = StorageError>

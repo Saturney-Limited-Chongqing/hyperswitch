@@ -278,3 +278,5 @@ Check the [CHANGELOG.md](./CHANGELOG.md) file for details.
 This product is licensed under the [Apache 2.0 License](LICENSE).
 
 For Rauthy OIDC dashboard login, see [Rauthy SSO](docs/rauthy_sso.md).
+
+Channel daily quotas and RSA-only EPay V2 ingress: [setup and operational boundaries](docs/channel_limits_and_epay_v2.md).

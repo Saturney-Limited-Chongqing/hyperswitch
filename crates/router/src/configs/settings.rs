@@ -459,6 +459,9 @@ pub struct Platform {
     /// Register these alongside assigning collection dashboard roles.
     #[serde(default)]
     pub collection_merchant_ids: HashSet<id_type::MerchantId>,
+    /// Enable only after applying the channel_daily_limits migration. Fail closed on storage errors.
+    #[serde(default)]
+    pub channel_daily_limits_enabled: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

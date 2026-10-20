@@ -2411,6 +2411,15 @@ impl Configs {
     pub fn server(config: AppState) -> Scope {
         web::scope("/configs")
             .app_data(web::Data::new(config))
+            .service(
+                web::resource("/channel-limits/reconcile")
+                    .route(web::post().to(channel_limits_resolve)),
+            )
+            .service(
+                web::resource("/channel-limits")
+                    .route(web::get().to(channel_limits_list))
+                    .route(web::post().to(channel_limits_set)),
+            )
             .service(web::resource("/").route(web::post().to(config_key_create)))
             .service(
                 web::resource("/{key}")

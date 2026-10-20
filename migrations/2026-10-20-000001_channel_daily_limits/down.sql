@@ -1,0 +1,2 @@
+DROP FUNCTION channel_limit_command(TEXT,JSONB);
+DROP TABLE channel_limit_audit,channel_limit_reservation,channel_limit_binding,channel_limit_pool;

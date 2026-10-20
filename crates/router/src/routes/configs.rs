@@ -1,3 +1,4 @@
+use crate::services::authorization::permissions::Permission;
 use actix_web::{web, HttpRequest, Responder};
 use router_env::{instrument, tracing, Flow};
 
@@ -96,4 +97,110 @@ pub async fn config_key_delete(
         api_locking::LockAction::NotApplicable,
     )
     .await
+}
+
+/// Platform-only management. Merchant keys and dashboard roles cannot mutate quotas.
+#[cfg(feature = "v1")]
+pub async fn channel_limits_list(state: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+    api::server_wrap(
+        Flow::ConfigKeyFetch,
+        state,
+        &req,
+        (),
+        |state, _, _, _| async move {
+            let value = state
+                .store
+                .channel_limit_command("list", serde_json::json!({}))
+                .await?;
+            Ok(crate::services::ApplicationResponse::Json(value))
+        },
+        auth::auth_type(
+            &ADMIN_API_AUTH,
+            &auth::JWTAuth {
+                permission: Permission::TenantAccountWrite,
+                allow_connected: false,
+                allow_platform: true,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    )
+    .await
+}
+#[cfg(feature = "v1")]
+pub async fn channel_limits_set(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    payload: web::Json<serde_json::Value>,
+) -> impl Responder {
+    api::server_wrap(
+        Flow::ConfigKeyUpdate,
+        state,
+        &req,
+        payload.into_inner(),
+        |state, _, data, _| async move {
+            for key in [
+                "merchant_id",
+                "merchant_connector_id",
+                "pool_id",
+                "currency",
+                "timezone",
+            ] {
+                if !data
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|s| !s.is_empty() && s.len() <= 128)
+                {
+                    return Err(crate::core::errors::ApiErrorResponse::InvalidRequestData {
+                        message: format!("Invalid {key}"),
+                    }
+                    .into());
+                }
+            }
+            if !data
+                .get("daily_limit")
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|n| n >= 0)
+            {
+                return Err(crate::core::errors::ApiErrorResponse::InvalidRequestData {
+                    message: "daily_limit must be a nonnegative minor-unit integer".to_owned(),
+                }
+                .into());
+            }
+            let value = state.store.channel_limit_command("set", data).await?;
+            Ok(crate::services::ApplicationResponse::Json(value))
+        },
+        auth::auth_type(
+            &ADMIN_API_AUTH,
+            &auth::JWTAuth {
+                permission: Permission::TenantAccountWrite,
+                allow_connected: false,
+                allow_platform: true,
+            },
+            req.headers(),
+        ),
+        api_locking::LockAction::NotApplicable,
+    )
+    .await
+}
+
+#[cfg(feature = "v1")]
+pub async fn channel_limits_resolve(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+    payload: web::Json<serde_json::Value>,
+) -> impl Responder {
+    api::server_wrap(Flow::ConfigKeyUpdate,state,&req,payload.into_inner(),|state,_,data,_| async move {
+        if !matches!(data.get("state").and_then(serde_json::Value::as_str),Some("committed" | "released"))
+            || !data.get("reason").and_then(serde_json::Value::as_str).is_some_and(|v|v.trim().len()>=10)
+            || ["merchant_id","merchant_connector_id","attempt_id"].iter().any(|key|!data.get(*key).and_then(serde_json::Value::as_str).is_some_and(|v|!v.is_empty()))
+        {
+            return Err(crate::core::errors::ApiErrorResponse::InvalidRequestData { message:"Resolution requires merchant, channel, attempt, state and reconciliation evidence".to_owned() }.into());
+        }
+        let value=state.store.channel_limit_command("resolve",data).await?;
+        Ok(crate::services::ApplicationResponse::Json(value))
+    },auth::auth_type(&ADMIN_API_AUTH,&auth::JWTAuth {
+        permission: Permission::TenantAccountWrite,
+        allow_connected: false,allow_platform:true,
+    },req.headers()),api_locking::LockAction::NotApplicable).await
 }

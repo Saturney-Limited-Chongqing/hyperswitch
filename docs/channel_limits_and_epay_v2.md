@@ -1,0 +1,113 @@
+# Channel daily limits and EPay V2 ingress
+
+This extension targets the current Hyperswitch **V1** payment execution path. It does not change payment connectors. The optional EPay gateway is an independent, RSA-only ingress service using the native merchant payment API. It is not an outbound connector to another EPay platform.
+
+## Channel quota execution
+
+Apply `migrations/2026-10-20-000001_channel_daily_limits` in each tenant's payment database schema before enabling:
+
+```toml
+[platform]
+channel_daily_limits_enabled = true
+```
+
+When disabled, existing payment traffic does not query the quota tables. When enabled, quota storage errors fail closed. Payment execution requires a resolved merchant connector account. External-vault proxy execution is explicitly refused while this flag is enabled because that alternate executor does not yet implement the reservation contract; there is no unguarded proxy fallback. This extension does not cover V2 payment execution; do not enable V2 traffic expecting these guards to apply.
+
+Quota policies are bound to `(merchant_id, merchant_connector_id, currency)`. A `pool_id` may deliberately be shared by multiple merchant connector accounts using the same upstream account. Limits, currency, timezone and enabled state belong to that pool. Disabling or changing the limit of a shared pool affects **all** its members.
+
+An unbound channel keeps its existing behavior. A bound channel rejects unconfigured currencies. To enforce limits for every channel, register every active account/currency pair before admitting traffic; enrolling a merchant in collection isolation does not itself provision quota policies.
+
+Both a platform administrative key and a tenant-level dashboard JWT with `TenantAccountWrite` permission may manage policies. Merchant keys and merchant dashboard roles cannot. Endpoints:
+
+- `GET /configs/channel-limits`: bindings, pool policy and today's used amount, including reservations.
+- `POST /configs/channel-limits`: create binding or update a pool's limit/enabled state.
+- `POST /configs/channel-limits/reconcile`: resolve an uncertain reservation after independent reconciliation. Requires `merchant_id`, `merchant_connector_id`, `attempt_id`, `state` (`committed` or `released`) and a meaningful `reason` describing reconciliation evidence. Committed charges cannot be released.
+
+The platform dashboard has a Channel daily limits panel on `/platform`. It converts the displayed currency amount into its minimum denomination using the existing currency precision definitions. For API calls, amounts are always integers in minimum denomination:
+
+```json
+{
+  "merchant_id": "collection_a",
+  "merchant_connector_id": "mca_replace_me",
+  "pool_id": "upstream-account-a-usd",
+  "currency": "USD",
+  "daily_limit": 300000,
+  "timezone": "Asia/Shanghai",
+  "enabled": true
+}
+```
+
+This means USD 3,000 per local calendar day. PostgreSQL validates the timezone. The pool's currency/timezone and a channel's pool association are immutable so changing configuration cannot reset existing usage. A zero limit closes admission; lowering a limit never removes existing reservations. Configuration changes and manual resolutions have an append-only application audit table; database operators must separately control table privileges and retention.
+
+The CLI `scripts/channel_limits.py` reads `HYPERSWITCH_PLATFORM_TOKEN` or `HYPERSWITCH_ADMIN_KEY`, and optionally `HYPERSWITCH_API_URL`. Use `list`, `set --policy /private/policy.json`, or `resolve --policy /private/resolution.json`. Never place administrative keys in browser configuration.
+
+### Accounting and failure semantics
+
+The router excludes unavailable channels during route planning and atomically reserves the selected channel **before** connector preparation/calls. Each PostgreSQL pool row serializes concurrent admissions across processes and merchants. `(merchant_id, attempt_id, merchant_connector_id)` makes same-day reservation retries idempotent; changing the amount of an existing reservation is refused. Incremental authorization that increases the reserved amount is consequently refused for a managed channel.
+
+The guard counts the total attempt amount, including amounts represented in the attempt's net total. Read-only sync and void flows do not acquire new reservations. Confirmed charged/partially charged results commit the full reservation conservatively. A positively confirmed void or definite authorization/authentication decline may release a reservation. Transport errors, ambiguous timeouts, 5xx, 408, 409, 425 and 429 keep the reservation. Refunds never restore a committed allowance. Partial capture keeps the original full reserved amount rather than releasing unused capacity prematurely.
+
+A crash after reservation does not lose the hold. There is no automatic reservation TTL: abandonment and uncertain results must be reconciled, including results that arrive through update paths outside the normal connector completion hook. Conservative unreleased holds may reduce available capacity, but do not create extra capacity. PostgreSQL is the source of truth; Redis eviction/restart cannot reset usage.
+
+Pending reservations carry forward across midnight and continue to consume today’s capacity. Confirmed charges are assigned to the local date on which the router records their successful result. Previous-day committed charges no longer consume today’s allowance. A previous-day committed attempt cannot issue a new charge/capture through the guard: multi-day partial captures on one attempt are refused, rather than bypassing the next day’s cap. This conservatively bounds admitted and observed charged volume, **not an upstream settlement-day guarantee**. Delayed notifications, upstream settlement cutoffs and timezone differences require upstream-specific reconciliation. Do not free pending authorizations at midnight or assume refunds restore the upstream limit.
+
+Route planning is an availability check; the final reservation is authoritative. If another request consumes the remaining capacity between planning and reservation, the request is refused before the connector call. It can be retried through normal routing, but the router does not silently retry an already ambiguous upstream payment on another channel.
+
+## RSA-only EPay V2 gateway
+
+Files are in `services/epay_v2/`. Runtime dependencies are Python 3.11+ and OpenSSL with RSA support, not additional Python packages. Run behind an HTTPS reverse proxy; the built-in server binds loopback by default and bounds concurrent requests.
+
+```text
+EPay V2 client -> RSA verification -> merchant-bound native API
+              -> native routing -> channel reservation -> existing connector
+              -> authoritative payment status -> signed response / durable notification
+```
+
+Supported subset:
+
+| Endpoint | Method | Behavior |
+| --- | --- | --- |
+| `/api/pay/submit` | GET/POST | Redirect to a native hosted payment link |
+| `/api/pay/create` | POST | Return `pay_type=jump` and the native payment link |
+| `/api/pay/query` | POST | Merchant-scoped order query; `status=1` only for native `succeeded` |
+
+`submit` may omit `type` only when the merchant has a configured default or a single enabled type. `create` requires `type`. External order identifiers accept 1–64 ASCII letters, digits, underscores, dots and hyphens. `method` supports `web` and `jump`; jsapi/app/scan/applet, refunds, transfers and merchant-list APIs are not implemented and must not be advertised. Native payment methods/connectors still have to support the selected type. Default mappings are `alipay -> ali_pay` and `wxpay -> we_chat_pay`; an administrator may supply `payment_method_types` mappings in the private configuration. These become native `allowed_payment_method_types`, not routing overrides.
+
+Only `sign_type=RSA` is accepted (omission implies RSA, never MD5). Requests require a ten-digit seconds timestamp within 300 seconds. Signatures use RSA PKCS#1 v1.5 + SHA-256, Base64 encoded. Nonempty scalar fields are sorted by ASCII parameter name and joined as raw UTF-8 `key=value` pairs using `&`. `sign` and `sign_type` are excluded. Whitespace-only values use the PHP SDK's empty-value convention. No shared secret is appended. Duplicate form keys and unsupported fields are refused.
+
+The merchant signs requests with its private key; the gateway verifies against registered merchant public keys. Responses and notifications are signed with the platform private key. The merchant must verify the platform signature and timestamp. Multiple registered merchant public keys support overlap during rotation; platform key rotation must be coordinated with clients. Use RSA 2048, 3072 or 4096 bit keys and PEM key files. No V1 paths or MD5 downgrade are provided.
+
+Protocol reference: [EPay PHP V2 SDK service class](https://github.com/OpenAegis/epay_sdk_php_v2/blob/main/lib/EpayCore.class.php). This repository is a published SDK copy, not verified as the original vendor. Its canonicalization and `orderStatus` behavior are the interoperability target; no third-party SDK code is executed by the service. Compatibility is limited to the subset above and the included tests, not a certification of every EPay fork.
+
+### Configuration and execution
+
+Copy `services/epay_v2/config.example.json` to a private directory, replace identifiers/keys, and set mode `0600`. Private keys must also be `0600`; keep the parent directory private. The service stores native API keys only in this configuration and accepts no such keys from clients. Platform and merchant private keys must never be stored in this repository.
+
+```sh
+python3 services/epay_v2/gateway.py --config /private/epay/gateway.json
+```
+
+Each numeric `pid` maps to exactly one native merchant/profile/API key. Native API keys must belong to the corresponding collection merchant. The currency is fixed by that mapping; `money` is never silently converted between currencies. The compatibility layer supports CNY/USD/EUR/HKD/GBP with two decimals. The channel quota API itself uses native minor units and is not limited to these currencies.
+
+`public_url` is the externally reachable gateway base URL and is required for native hosted-checkout returns. `default_return_url` is required for callers omitting `return_url`. The native return points to an unguessable gateway order token. The gateway ignores browser-supplied status, queries native stored status and only redirects with RSA-signed `TRADE_SUCCESS` fields after authoritative success. An unconfirmed payment displays a waiting message without signing success. Returning to a merchant page does not replace asynchronous notification; merchants should use signed notifications or query before fulfilling orders. Callback URLs cannot already contain protocol parameter names because duplicate query keys would make verification ambiguous.
+
+The included `client.py` is an RSA-only command-line client. Its private configuration contains `api_url`, `pid`, `merchant_private_key`, `platform_public_key`. It verifies platform signatures even on error responses. Use `create` or `query` with a JSON parameters argument; never put private key contents in arguments.
+
+### Durability, callbacks and deployment limits
+
+A persistent SQLite WAL ledger enforces `(pid, out_trade_no)` uniqueness, records order parameters and notification delivery state. The native payment ID is deterministic, so a crash during creation can recover by querying that same native payment before retrying. A repeated order with changed amount, type, description or callback is rejected. PID-scoped queries prevent cross-merchant order access.
+
+The worker polls native stored payment status; configure native connector webhooks correctly. It does not turn browser returns or unverified caller messages into successful payments. Successful native payments enqueue signed GET notifications. Only a 2xx response containing `success` (surrounding whitespace allowed) acknowledges delivery. Attempts persist before sending; delivery is at least once, with up to ten attempts and exponential backoff capped at one hour. Merchants must deduplicate fulfillment by order ID. Back up the ledger: losing it loses compatibility order mapping and delivery state.
+
+Callbacks/return URLs require HTTPS and public destinations. Callback connections pin the validated resolved IP, preserve TLS hostname verification, and never follow redirects. The loopback-only HTTP test override is `test_allow_loopback_callbacks`; do not enable it in production. Callbacks with private, link-local or reserved destinations are refused.
+
+Run **one gateway instance per SQLite ledger**, on local persistent storage. This initial service does not claim multi-instance gateway HA; use a shared transactional database/outbox before horizontally scaling the compatibility service. Hyperswitch quota reservations themselves are PostgreSQL-backed and work across native router instances. Terminate HTTPS and apply normal request-rate limits at the reverse proxy.
+
+## Verification
+
+All tests/builds run on the designated remote debugging host, not by restoring local Redis/PostgreSQL/Node dependencies.
+
+- `python3 scripts/test_channel_limits.py`: isolated PostgreSQL schema, real concurrent connections, shared pools, idempotency, amount/currency bypass, terminal states, policy changes and local-day buckets.
+- `cd services/epay_v2 && python3 -m unittest -v test_gateway`: RSA, tampering, timestamps, HTTP parser, no MD5/V1, merchant boundaries, order conflicts and durable notification retries using a simulated backend.
+- `python3 scripts/test_collection_payment_features.py`: private disposable fixtures, real native backend, platform/merchant authorization, zero-quota confirmed-payment rejection and both merchants' signed V2 hosted-link creation/query. It never submits a payment with a positive quota for actual charging.
+- Existing Rust, collection-isolation and browser tests remain required.

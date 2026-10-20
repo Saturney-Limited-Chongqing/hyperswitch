@@ -14,16 +14,17 @@ index 7a2f751..ec36b55 100644
      "@eslint/create-config": "0.4.6",
 diff --git a/playwright-tests/collection/isolation.spec.ts b/playwright-tests/collection/isolation.spec.ts
 new file mode 100644
-index 0000000..a410971
+index 0000000..87ad5e3
 --- /dev/null
 +++ b/playwright-tests/collection/isolation.spec.ts
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,194 @@
 +import { test, expect } from "@playwright/test";
 +import fs from "node:fs";
 +
 +type Merchant = {
 +  merchant_id: string;
 +  profile_id: string;
++  connector_id: string;
 +  token: string;
 +  platform_token: string;
 +};
@@ -78,6 +79,7 @@ index 0000000..a410971
 +      page.getByText("Merchant management", { exact: true }),
 +    ).toHaveCount(0);
 +    await expect(page.getByText("Workflow", { exact: true })).toHaveCount(0);
++    await expect(page.getByTestId("channel-daily-limits")).toHaveCount(0);
 +    await page.screenshot({
 +      path: test.info().outputPath(`${merchant.merchant_id}-home.png`),
 +    });
@@ -151,6 +153,235 @@ index 0000000..a410971
 +    path: test.info().outputPath("platform-channels.png"),
 +  });
 +  await context.close();
++});
++
++test("platform administrator configures a channel daily allowance", async ({
++  browser,
++  baseURL,
++}) => {
++  const merchant = fixtures.merchants[0];
++  const context = await browser.newContext();
++  await context.addInitScript((token) => {
++    if (!localStorage.getItem("USER_INFO"))
++      localStorage.setItem("USER_INFO", JSON.stringify({ token }));
++  }, merchant.platform_token);
++  const page = await context.newPage();
++  await page.goto(baseURL!);
++  await expect(page.getByTestId("dashboard-identity")).toContainText(
++    "Platform administration",
++    { timeout: 60000 },
++  );
++  await page.getByText("Merchant management", { exact: true }).click();
++  const panel = page.getByTestId("channel-daily-limits");
++  await expect(panel).toBeVisible();
++  // Existing bindings are immutable: reuse the current test account's pool.
++  const apiBase = (fixtures as unknown as { base_url: string }).base_url;
++  const result = await page.request.get(apiBase + "/configs/channel-limits", {
++    headers: { Authorization: "Bearer " + merchant.platform_token },
++  });
++  expect(result.status()).toBe(200);
++  const rows = await result.json();
++  const policy = rows.find(
++    (row: { merchant_connector_id: string; currency: string }) =>
++      row.merchant_connector_id === merchant.connector_id &&
++      row.currency === "USD",
++  );
++  expect(policy).toBeTruthy();
++  await panel
++    .getByLabel("Merchant ID", { exact: true })
++    .fill(merchant.merchant_id);
++  await panel.getByLabel("Channel account ID").fill(merchant.connector_id);
++  await panel.getByLabel("Shared pool ID").fill(policy.pool_id);
++  await panel.getByLabel("Currency", { exact: true }).fill("USD");
++  await panel.getByLabel("Timezone", { exact: true }).fill(policy.timezone);
++  await panel.getByLabel("Daily amount").fill("3000.001");
++  await panel.getByRole("button", { name: "Save daily limit" }).click();
++  await expect(panel.getByRole("status")).toContainText(
++    "correct number of decimal places",
++  );
++  await panel.getByLabel("Daily amount").fill("3000.00");
++  const saved = page.waitForResponse(
++    (response) =>
++      response.url().endsWith("/configs/channel-limits") &&
++      response.request().method() === "POST",
++  );
++  await panel.getByRole("button", { name: "Save daily limit" }).click();
++  const response = await saved;
++  expect(response.status()).toBe(200);
++  expect((await response.json()).daily_limit).toBe(300000);
++  await expect(panel.getByRole("status")).toHaveText("Channel limit saved.");
++  await context.close();
++});
+diff --git a/playwright-tests/collection/rauthy.spec.ts b/playwright-tests/collection/rauthy.spec.ts
+new file mode 100644
+index 0000000..a452fa2
+--- /dev/null
++++ b/playwright-tests/collection/rauthy.spec.ts
+@@ -0,0 +1,165 @@
++import { test, expect, type Page } from "@playwright/test";
++import fs from "node:fs";
++
++type Identity = {
++  email: string;
++  password: string;
++  role_id: string;
++  merchant_id?: string;
++};
++type Fixtures = {
++  auth_id: string;
++  api_url: string;
++  users: Identity[];
++  unbound: Identity;
++};
++const path = process.env.RAUTHY_TEST_FIXTURES;
++const fixtures: Fixtures | undefined = path
++  ? JSON.parse(fs.readFileSync(path, "utf8"))
++  : undefined;
++
++test.describe("Rauthy OIDC", () => {
++  test.skip(
++    !fixtures,
++    "Set RAUTHY_TEST_FIXTURES for the dedicated remote Rauthy instance",
++  );
++  test.setTimeout(120000);
++
++  async function authenticate(page: Page, user: Identity, baseURL: string) {
++    await page.goto(
++      `${baseURL}/?auth_id=${encodeURIComponent(fixtures!.auth_id)}`,
++    );
++    await page
++      .getByRole("button", { name: "Continue with Rauthy", exact: true })
++      .click();
++    await page.waitForURL(/localhost:18090\/auth\/v1\/oidc\/authorize/);
++    const authorization = new URL(page.url());
++    expect(authorization.searchParams.get("code_challenge_method")).toBe(
++      "S256",
++    );
++    expect(authorization.searchParams.get("nonce")).toBeTruthy();
++    await page.waitForLoadState("networkidle");
++    await page.locator('input[type="email"]').fill(user.email);
++    await page.locator('input[type="email"]').press("Tab");
++    await page
++      .locator("button:visible")
++      .filter({ hasText: /^Login$/ })
++      .first()
++      .click();
++    await page.locator('input[type="password"]:visible').fill(user.password);
++    await page.locator('input[type="password"]:visible').press("Tab");
++    const response = page.waitForResponse((r) =>
++      new URL(r.url()).pathname.endsWith("/user/oidc"),
++    );
++    await page
++      .locator("button:visible")
++      .filter({ hasText: /^Login$/ })
++      .first()
++      .click();
++    return response;
++  }
++
++  for (const index of [0, 1, 2]) {
++    test(`bound identity ${index} receives only its local dashboard role`, async ({
++      page,
++      baseURL,
++      request,
++    }) => {
++      const user = fixtures!.users[index];
++      let callback: { code: string | null; state: string | null } | undefined;
++      page.on("request", (r) => {
++        const url = new URL(r.url());
++        if (url.pathname === "/redirect/oidc/rauthy")
++          callback = {
++            code: url.searchParams.get("code"),
++            state: url.searchParams.get("state"),
++          };
++      });
++      // An otherwise valid callback cannot be used from another browser.
++      await page.route("**/redirect/oidc/rauthy?**", async (route) => {
++        const url = new URL(route.request().url());
++        const foreign = await request.post(`${fixtures!.api_url}/user/oidc`, {
++          data: {
++            code: url.searchParams.get("code"),
++            state: url.searchParams.get("state"),
++          },
++        });
++        expect(foreign.status()).toBe(400);
++        expect((await foreign.json()).token).toBeUndefined();
++        await route.continue();
++      });
++      const response = await authenticate(page, user, baseURL!);
++      expect(response.status()).toBe(200);
++      const tokenResponse = await response.json();
++      expect(tokenResponse.token_type).toBe("user_info");
++      const info = await request.get(`${fixtures!.api_url}/user`, {
++        headers: { Authorization: `Bearer ${tokenResponse.token}` },
++      });
++      expect(info.status()).toBe(200);
++      expect((await info.json()).role_id).toBe(user.role_id);
++      await expect(page).toHaveURL(/\/(?:v2\/)?home\/?$/);
++      if (user.merchant_id) {
++        await expect(page.getByTestId("collection-home")).toBeVisible({
++          timeout: 60000,
++        });
++        await expect(page.getByTestId("dashboard-identity")).toContainText(
++          user.merchant_id,
++        );
++        const home = new URL(page.url());
++        home.pathname = home.pathname.replace(
++          /\/(?:v2\/)?home\/?$/,
++          "/platform",
++        );
++        await page.goto(home.href);
++        await expect(
++          page.getByText(
++            "This page is managed by your platform administrator.",
++          ),
++        ).toBeVisible();
++        const other =
++          user.merchant_id === "collection_a" ? "collection_b" : "collection_a";
++        const cross = await request.get(
++          `${fixtures!.api_url}/accounts/${other}`,
++          { headers: { Authorization: `Bearer ${tokenResponse.token}` } },
++        );
++        expect(cross.status()).toBeGreaterThanOrEqual(400);
++        expect(cross.status()).toBeLessThan(500);
++      } else {
++        await expect(page.getByTestId("dashboard-identity")).toContainText(
++          "Platform administration",
++          { timeout: 60000 },
++        );
++      }
++      // A successful callback consumes its nonce: the same code/state cannot sign in again.
++      expect(callback).toBeTruthy();
++      const replay = await page.request.post(`${fixtures!.api_url}/user/oidc`, {
++        data: callback,
++      });
++      expect(replay.status()).toBe(400);
++    });
++  }
++
++  test("same-email local account without an explicit subject binding is rejected", async ({
++    page,
++    baseURL,
++  }) => {
++    const response = await authenticate(page, fixtures!.unbound, baseURL!);
++    expect(response.status()).toBe(400);
++    const body = await response.json();
++    expect(body.token).toBeUndefined();
++    await expect(page.getByTestId("dashboard-identity")).toHaveCount(0);
++  });
++
++  test("unknown state cannot create a dashboard session", async ({
++    request,
++  }) => {
++    const response = await request.post(`${fixtures!.api_url}/user/oidc`, {
++      data: {
++        state: "not-a-real-authorization-state",
++        code: "not-a-real-code",
++      },
++    });
++    expect(response.status()).toBe(400);
++    expect((await response.json()).token).toBeUndefined();
++  });
 +});
 diff --git a/playwright.collection.config.ts b/playwright.collection.config.ts
 new file mode 100644
@@ -334,6 +565,166 @@ index 6075ecb..5d84b7f 100644
        removeItemFromLocalStorage(~key="PRE_LOGIN_INFO")
        removeItemFromLocalStorage(~key="email_token")
        removeItemFromLocalStorage(~key="code")
+diff --git a/src/entryPoints/ChannelDailyLimits.res b/src/entryPoints/ChannelDailyLimits.res
+new file mode 100644
+index 0000000..2926e69
+--- /dev/null
++++ b/src/entryPoints/ChannelDailyLimits.res
+@@ -0,0 +1,154 @@
++open LogicUtils
++@val @scope("Math") external roundAmount: float => float = "round"
++
++module Field = {
++  @react.component
++  let make = (~label, ~value, ~onChange, ~placeholder="") => {
++    <label className="flex flex-col gap-1">
++      <span className="text-sm font-semibold"> {label->React.string} </span>
++      <input
++        ariaLabel=label
++        className="border rounded p-2"
++        value
++        placeholder
++        onChange={event => onChange(ReactEvent.Form.target(event)["value"])}
++      />
++    </label>
++  }
++}
++
++@react.component
++let make = () => {
++  let {merchantId} = React.useContext(UserInfoProvider.defaultContext).getCommonSessionDetails()
++  let get = APIUtils.useGetMethod(~showErrorToast=false)
++  let update = APIUtils.useUpdateMethod(~showErrorToast=false)
++  let endpoint = APIUtils.resolveEndpoint(APIUtilsTypes.Default("configs/channel-limits"))
++  let (rows, setRows) = React.useState(_ => [])
++  let (merchant, setMerchant) = React.useState(_ => merchantId)
++  let (channel, setChannel) = React.useState(_ => "")
++  let (pool, setPool) = React.useState(_ => "")
++  let (currency, setCurrency) = React.useState(_ => "USD")
++  let (timezone, setTimezone) = React.useState(_ => "UTC")
++  let (amount, setAmount) = React.useState(_ => "3000.00")
++  let (enabled, setEnabled) = React.useState(_ => true)
++  let (busy, setBusy) = React.useState(_ => false)
++  let (message, setMessage) = React.useState(_ => "")
++  let load = async () => {
++    try {
++      let result = await get(endpoint)
++      setRows(_ => result->getArrayFromJson([]))
++    } catch {
++    | _ =>
++      setMessage(_ =>
++        "Unable to load channel limits. Check platform access and whether the service is enabled."
++      )
++    }
++  }
++  React.useEffect0(() => {
++    load()->ignore
++    None
++  })
++  let save = async () => {
++    let decimals = amount->String.split(".")->Array.get(1)->Option.mapOr(0, String.length)
++    if (
++      decimals > CurrencyUtils.getAmountPrecisionDigits(currency) ||
++        !Js.Re.test_(%re("/^(0|[1-9][0-9]{0,9})(\.[0-9]{1,4})?$/"), amount)
++    ) {
++      setMessage(_ =>
++        "Enter an amount with the correct number of decimal places for this currency."
++      )
++    } else {
++      setBusy(_ => true)
++      try {
++        let minor =
++          CurrencyUtils.convertCurrencyToLowestDenomination(
++            ~amount=amount->Float.fromString->Option.getOr(0.0),
++            ~currency,
++          )->roundAmount
++        let body =
++          [
++            ("merchant_id", merchant->JSON.Encode.string),
++            ("merchant_connector_id", channel->JSON.Encode.string),
++            ("pool_id", pool->JSON.Encode.string),
++            ("currency", currency->JSON.Encode.string),
++            ("timezone", timezone->JSON.Encode.string),
++            ("daily_limit", minor->JSON.Encode.float),
++            ("enabled", enabled->JSON.Encode.bool),
++          ]
++          ->Dict.fromArray
++          ->JSON.Encode.object
++        let _ = await update(endpoint, body, Fetch.Post)
++        setMessage(_ => "Channel limit saved.")
++        await load()
++      } catch {
++      | _ =>
++        setMessage(_ =>
++          "Unable to save. Verify the merchant, channel, currency, timezone and shared pool."
++        )
++      }
++      setBusy(_ => false)
++    }
++  }
++  <section dataTestId="channel-daily-limits" className="border rounded-lg p-5 flex flex-col gap-4">
++    <h2 className="text-xl font-semibold"> {"Channel daily limits"->React.string} </h2>
++    <p>
++      {"Limits include pending payments. Channels sharing a pool share its daily allowance. Changing a shared pool affects every linked channel."->React.string}
++    </p>
++    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
++      <Field label="Merchant ID" value=merchant onChange={v => setMerchant(_ => v)} />
++      <Field label="Channel account ID" value=channel onChange={v => setChannel(_ => v)} />
++      <Field
++        label="Shared pool ID"
++        value=pool
++        onChange={v => setPool(_ => v)}
++        placeholder="Use a unique name for an independent channel"
++      />
++      <Field label="Currency" value=currency onChange={v => setCurrency(_ => v)} />
++      <Field
++        label="Timezone"
++        value=timezone
++        onChange={v => setTimezone(_ => v)}
++        placeholder="Asia/Shanghai"
++      />
++      <Field label="Daily amount" value=amount onChange={v => setAmount(_ => v)} />
++    </div>
++    <label>
++      <input type_="checkbox" checked=enabled onChange={_ => setEnabled(v => !v)} />
++      {" Channel enabled"->React.string}
++    </label>
++    <button disabled=busy className="border rounded px-4 py-2" onClick={_ => save()->ignore}>
++      {"Save daily limit"->React.string}
++    </button>
++    <p role="status"> {message->React.string} </p>
++    {rows
++    ->Array.map(row => {
++      let dict = row->getDictFromJsonObject
++      let id = dict->getString("merchant_connector_id", "")
++      let curr = dict->getString("currency", "")
++      let limit =
++        (dict->getFloat("daily_limit", 0.0) /. CurrencyUtils.getCurrencyConversionFactor(curr))
++          ->Float.toString
++      let used =
++        (dict->getFloat("used", 0.0) /. CurrencyUtils.getCurrencyConversionFactor(curr))
++          ->Float.toString
++      <button
++        key={id ++ curr}
++        className="border rounded p-3 text-left"
++        onClick={_ => {
++          setMerchant(_ => dict->getString("merchant_id", ""))
++          setChannel(_ => id)
++          setPool(_ => dict->getString("pool_id", ""))
++          setCurrency(_ => curr)
++          setTimezone(_ => dict->getString("timezone", "UTC"))
++          setAmount(_ => limit)
++          setEnabled(_ => dict->getBool("enabled", true))
++        }}>
++        {`${id}: ${used} / ${limit} ${curr} — ${dict->getString(
++            "timezone",
++            "UTC",
++          )}`->React.string}
++      </button>
++    })
++    ->React.array}
++  </section>
++}
 diff --git a/src/entryPoints/CollectionHome.res b/src/entryPoints/CollectionHome.res
 new file mode 100644
 index 0000000..fab0436
@@ -551,10 +942,10 @@ index 4ddf539..f230495 100644
  
 diff --git a/src/entryPoints/PlatformManagement.res b/src/entryPoints/PlatformManagement.res
 new file mode 100644
-index 0000000..c8a4b87
+index 0000000..2a7d9f4
 --- /dev/null
 +++ b/src/entryPoints/PlatformManagement.res
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,51 @@
 +@react.component
 +let make = () => {
 +  let merchants = Recoil.useRecoilValueFromAtom(HyperswitchAtom.merchantListAtom)
@@ -603,6 +994,7 @@ index 0000000..c8a4b87
 +      )
 +      ->React.array}
 +    </div>
++    <ChannelDailyLimits />
 +  </section>
 +}
 diff --git a/src/entryPoints/SidebarHooks.res b/src/entryPoints/SidebarHooks.res
@@ -929,174 +1321,3 @@ index c81029a..121878f 100644
      pathRewrite: { "^/api": "" },
      changeOrigin: true,
    },
-diff --git a/playwright-tests/collection/rauthy.spec.ts b/playwright-tests/collection/rauthy.spec.ts
-new file mode 100644
-index 0000000..a452fa2
---- /dev/null
-+++ b/playwright-tests/collection/rauthy.spec.ts
-@@ -0,0 +1,165 @@
-+import { test, expect, type Page } from "@playwright/test";
-+import fs from "node:fs";
-+
-+type Identity = {
-+  email: string;
-+  password: string;
-+  role_id: string;
-+  merchant_id?: string;
-+};
-+type Fixtures = {
-+  auth_id: string;
-+  api_url: string;
-+  users: Identity[];
-+  unbound: Identity;
-+};
-+const path = process.env.RAUTHY_TEST_FIXTURES;
-+const fixtures: Fixtures | undefined = path
-+  ? JSON.parse(fs.readFileSync(path, "utf8"))
-+  : undefined;
-+
-+test.describe("Rauthy OIDC", () => {
-+  test.skip(
-+    !fixtures,
-+    "Set RAUTHY_TEST_FIXTURES for the dedicated remote Rauthy instance",
-+  );
-+  test.setTimeout(120000);
-+
-+  async function authenticate(page: Page, user: Identity, baseURL: string) {
-+    await page.goto(
-+      `${baseURL}/?auth_id=${encodeURIComponent(fixtures!.auth_id)}`,
-+    );
-+    await page
-+      .getByRole("button", { name: "Continue with Rauthy", exact: true })
-+      .click();
-+    await page.waitForURL(/localhost:18090\/auth\/v1\/oidc\/authorize/);
-+    const authorization = new URL(page.url());
-+    expect(authorization.searchParams.get("code_challenge_method")).toBe(
-+      "S256",
-+    );
-+    expect(authorization.searchParams.get("nonce")).toBeTruthy();
-+    await page.waitForLoadState("networkidle");
-+    await page.locator('input[type="email"]').fill(user.email);
-+    await page.locator('input[type="email"]').press("Tab");
-+    await page
-+      .locator("button:visible")
-+      .filter({ hasText: /^Login$/ })
-+      .first()
-+      .click();
-+    await page.locator('input[type="password"]:visible').fill(user.password);
-+    await page.locator('input[type="password"]:visible').press("Tab");
-+    const response = page.waitForResponse((r) =>
-+      new URL(r.url()).pathname.endsWith("/user/oidc"),
-+    );
-+    await page
-+      .locator("button:visible")
-+      .filter({ hasText: /^Login$/ })
-+      .first()
-+      .click();
-+    return response;
-+  }
-+
-+  for (const index of [0, 1, 2]) {
-+    test(`bound identity ${index} receives only its local dashboard role`, async ({
-+      page,
-+      baseURL,
-+      request,
-+    }) => {
-+      const user = fixtures!.users[index];
-+      let callback: { code: string | null; state: string | null } | undefined;
-+      page.on("request", (r) => {
-+        const url = new URL(r.url());
-+        if (url.pathname === "/redirect/oidc/rauthy")
-+          callback = {
-+            code: url.searchParams.get("code"),
-+            state: url.searchParams.get("state"),
-+          };
-+      });
-+      // An otherwise valid callback cannot be used from another browser.
-+      await page.route("**/redirect/oidc/rauthy?**", async (route) => {
-+        const url = new URL(route.request().url());
-+        const foreign = await request.post(`${fixtures!.api_url}/user/oidc`, {
-+          data: {
-+            code: url.searchParams.get("code"),
-+            state: url.searchParams.get("state"),
-+          },
-+        });
-+        expect(foreign.status()).toBe(400);
-+        expect((await foreign.json()).token).toBeUndefined();
-+        await route.continue();
-+      });
-+      const response = await authenticate(page, user, baseURL!);
-+      expect(response.status()).toBe(200);
-+      const tokenResponse = await response.json();
-+      expect(tokenResponse.token_type).toBe("user_info");
-+      const info = await request.get(`${fixtures!.api_url}/user`, {
-+        headers: { Authorization: `Bearer ${tokenResponse.token}` },
-+      });
-+      expect(info.status()).toBe(200);
-+      expect((await info.json()).role_id).toBe(user.role_id);
-+      await expect(page).toHaveURL(/\/(?:v2\/)?home\/?$/);
-+      if (user.merchant_id) {
-+        await expect(page.getByTestId("collection-home")).toBeVisible({
-+          timeout: 60000,
-+        });
-+        await expect(page.getByTestId("dashboard-identity")).toContainText(
-+          user.merchant_id,
-+        );
-+        const home = new URL(page.url());
-+        home.pathname = home.pathname.replace(
-+          /\/(?:v2\/)?home\/?$/,
-+          "/platform",
-+        );
-+        await page.goto(home.href);
-+        await expect(
-+          page.getByText(
-+            "This page is managed by your platform administrator.",
-+          ),
-+        ).toBeVisible();
-+        const other =
-+          user.merchant_id === "collection_a" ? "collection_b" : "collection_a";
-+        const cross = await request.get(
-+          `${fixtures!.api_url}/accounts/${other}`,
-+          { headers: { Authorization: `Bearer ${tokenResponse.token}` } },
-+        );
-+        expect(cross.status()).toBeGreaterThanOrEqual(400);
-+        expect(cross.status()).toBeLessThan(500);
-+      } else {
-+        await expect(page.getByTestId("dashboard-identity")).toContainText(
-+          "Platform administration",
-+          { timeout: 60000 },
-+        );
-+      }
-+      // A successful callback consumes its nonce: the same code/state cannot sign in again.
-+      expect(callback).toBeTruthy();
-+      const replay = await page.request.post(`${fixtures!.api_url}/user/oidc`, {
-+        data: callback,
-+      });
-+      expect(replay.status()).toBe(400);
-+    });
-+  }
-+
-+  test("same-email local account without an explicit subject binding is rejected", async ({
-+    page,
-+    baseURL,
-+  }) => {
-+    const response = await authenticate(page, fixtures!.unbound, baseURL!);
-+    expect(response.status()).toBe(400);
-+    const body = await response.json();
-+    expect(body.token).toBeUndefined();
-+    await expect(page.getByTestId("dashboard-identity")).toHaveCount(0);
-+  });
-+
-+  test("unknown state cannot create a dashboard session", async ({
-+    request,
-+  }) => {
-+    const response = await request.post(`${fixtures!.api_url}/user/oidc`, {
-+      data: {
-+        state: "not-a-real-authorization-state",
-+        code: "not-a-real-code",
-+      },
-+    });
-+    expect(response.status()).toBe(400);
-+    expect((await response.json()).token).toBeUndefined();
-+  });
-+});

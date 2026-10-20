@@ -1,0 +1,19 @@
+{
+  "listen": "127.0.0.1",
+  "port": 18100,
+  "public_url": "https://pay.example.com",
+  "backend_url": "http://127.0.0.1:18080",
+  "database": "/var/lib/hyperswitch-epay/orders.db",
+  "platform_private_key": "/etc/hyperswitch-epay/platform-private.pem",
+  "default_return_url": "https://merchant.example/payment-complete",
+  "merchants": {
+    "10001": {
+      "merchant_id": "merchant_replace_me",
+      "profile_id": "pro_replace_me",
+      "api_key": "replace_me",
+      "public_keys": ["/etc/hyperswitch-epay/merchant-10001-public.pem"],
+      "currency": "CNY",
+      "types": ["alipay", "wxpay"]
+    }
+  }
+}

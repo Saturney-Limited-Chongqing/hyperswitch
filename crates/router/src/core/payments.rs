@@ -3710,6 +3710,12 @@ where
     dyn api::Connector:
         services::api::ConnectorIntegration<F, FData, router_types::PaymentsResponseData>,
 {
+    if state.conf.platform.channel_daily_limits_enabled {
+        return Err(errors::ApiErrorResponse::PreconditionFailed {
+            message: "External vault proxy is unavailable with channel quotas enabled".to_owned(),
+        }
+        .into());
+    }
     let previous_gateway = extract_gateway_system_from_payment_intent(payment_data);
 
     let (execution_path, updated_state, rollout_result) = should_call_unified_connector_service(
@@ -6265,6 +6271,34 @@ where
         + Send
         + Sync,
 {
+    if state.conf.platform.channel_daily_limits_enabled
+        && matches!(call_connector_action, CallConnectorAction::Trigger)
+        && crate::core::channel_limits::reserves(std::any::type_name::<F>())
+    {
+        let attempt = payment_data.get_payment_attempt();
+        let channel_id = attempt.merchant_connector_id.as_ref().ok_or(
+            errors::ApiErrorResponse::PreconditionFailed {
+                message: "Channel account required for quota enforcement".to_owned(),
+            },
+        )?;
+        let currency = attempt
+            .currency
+            .ok_or(errors::ApiErrorResponse::MissingRequiredField {
+                field_name: "currency".into(),
+            })?;
+        crate::core::channel_limits::reserve(
+            state,
+            serde_json::json!({
+                "merchant_id": router_data.merchant_id.get_string_repr(),
+                "merchant_connector_id": channel_id.get_string_repr(),
+                "attempt_id": router_data.attempt_id,
+                "amount": attempt.get_total_amount().get_amount_as_i64(),
+                "currency": currency.to_string(),
+            }),
+        )
+        .await?;
+    }
+
     let add_access_token_result = router_data
         .add_access_token(
             state,
@@ -6525,6 +6559,27 @@ where
     } else {
         Ok(router_data)
     }?;
+
+    if state.conf.platform.channel_daily_limits_enabled {
+        if let Some(channel_id) = payment_data
+            .get_payment_attempt()
+            .merchant_connector_id
+            .as_ref()
+        {
+            crate::core::channel_limits::settle(
+                state,
+                serde_json::json!({
+                    "merchant_id": router_data.merchant_id.get_string_repr(),
+                    "merchant_connector_id": channel_id.get_string_repr(),
+                    "attempt_id": router_data.attempt_id,
+                }),
+                router_data.status,
+                router_data.connector_http_status_code,
+                router_data.response.is_ok(),
+            )
+            .await?;
+        }
+    }
 
     let should_continue_payment = router_data.response.is_ok();
 
@@ -12499,6 +12554,47 @@ pub async fn plan_payment_execution_after_routing<F: Clone, D>(
 where
     D: OperationSessionGetters<F> + OperationSessionSetters<F> + Send + Sync + Clone,
 {
+    let connectors = if state.conf.platform.channel_daily_limits_enabled
+        && crate::core::channel_limits::reserves(std::any::type_name::<F>())
+    {
+        let attempt = payment_data.get_payment_attempt();
+        let mut eligible = Vec::with_capacity(connectors.len());
+        for candidate in connectors {
+            let channel = candidate
+                .connector_data
+                .merchant_connector_id
+                .as_ref()
+                .ok_or(errors::ApiErrorResponse::PreconditionFailed {
+                    message: "Channel account required for quota enforcement".to_owned(),
+                })?;
+            let outcome = state
+                .store
+                .channel_limit_command(
+                    "check",
+                    serde_json::json!({
+                        "merchant_id": attempt.merchant_id.get_string_repr(),
+                        "merchant_connector_id": channel.get_string_repr(),
+                        "attempt_id": attempt.attempt_id,
+                        "amount": attempt.get_total_amount().get_amount_as_i64(),
+                        "currency": attempt.currency.map(|c|c.to_string()),
+                    }),
+                )
+                .await?;
+            if outcome.get("allowed").and_then(serde_json::Value::as_bool) == Some(true) {
+                eligible.push(candidate);
+            }
+        }
+        if eligible.is_empty() {
+            return Err(errors::ApiErrorResponse::PreconditionFailed {
+                message: "No channel with available daily quota".to_owned(),
+            }
+            .into());
+        }
+        eligible
+    } else {
+        connectors
+    };
+
     let has_token_data = payment_data.get_token_data().is_some();
     let is_volatile_payment_method = payment_data
         .get_payment_method_info()

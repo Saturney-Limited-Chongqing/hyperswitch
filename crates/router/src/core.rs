@@ -14,6 +14,7 @@ pub mod cache;
 pub mod card_issuer;
 pub mod card_testing_guard;
 pub mod cards_info;
+pub mod channel_limits;
 pub mod conditional_config;
 pub mod configs;
 #[cfg(feature = "olap")]
