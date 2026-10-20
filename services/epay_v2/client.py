@@ -10,7 +10,7 @@ from gateway import rsa_sign, rsa_verify
 
 
 def request(config, endpoint, params):
-    if endpoint not in ('create', 'query'):
+    if endpoint not in ('create', 'query', 'refund', 'refundquery'):
         raise ValueError('Unsupported endpoint')
     parsed = urllib.parse.urlsplit(config['api_url'])
     if parsed.scheme != 'https' and not (parsed.scheme == 'http' and parsed.hostname in ('localhost', '127.0.0.1', '::1')):
@@ -34,7 +34,7 @@ def request(config, endpoint, params):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--config',required=True)
-    parser.add_argument('endpoint',choices=['create','query'])
+    parser.add_argument('endpoint',choices=['create','query','refund','refundquery'])
     parser.add_argument('params',help='JSON object with order fields')
     args=parser.parse_args()
     path=Path(args.config)

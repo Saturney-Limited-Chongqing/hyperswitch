@@ -28,7 +28,7 @@ from decimal import Decimal
 from pathlib import Path
 
 MAX_BODY = 65536
-FIELDS = set('pid type out_trade_no notify_url return_url name money param clientip device method timestamp sign sign_type trade_no'.split())
+FIELDS = set('pid type out_trade_no notify_url return_url name money param clientip device method timestamp sign sign_type trade_no out_refund_no refund_no'.split())
 
 class ProtocolError(Exception):
     pass
@@ -148,6 +148,16 @@ class Gateway:
               notification_due INTEGER NOT NULL DEFAULT 0, notification_done INTEGER NOT NULL DEFAULT 0,
               PRIMARY KEY(pid,out_trade_no));
             ''')
+            db.executescript('''
+            CREATE TABLE IF NOT EXISTS refunds (
+              pid TEXT NOT NULL, out_refund_no TEXT NOT NULL, refund_no TEXT NOT NULL UNIQUE,
+              trade_no TEXT NOT NULL REFERENCES orders(trade_no), amount INTEGER NOT NULL CHECK(amount>0),
+              currency TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'created',
+              lease_until INTEGER NOT NULL DEFAULT 0, poll_due INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+              PRIMARY KEY(pid,out_refund_no));
+            CREATE INDEX IF NOT EXISTS refunds_order ON refunds(pid,trade_no);
+            ''')
             columns = {row[1] for row in db.execute('PRAGMA table_info(orders)')}
             if 'return_token' not in columns:
                 db.execute('ALTER TABLE orders ADD COLUMN return_token TEXT')
@@ -159,6 +169,7 @@ class Gateway:
     def db(self):
         db = sqlite3.connect(self.db_path, timeout=30)
         db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
         try:
             with db:
                 yield db
@@ -182,7 +193,7 @@ class Gateway:
             raise ProtocolError('Invalid merchant or signature')
         return merchant
 
-    def backend(self, merchant, method, path, body=None):
+    def backend_json(self, merchant, method, path, body=None):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.config['backend_url'].rstrip('/') + path, data=data, method=method, headers={
             'api-key': merchant['api_key'], 'Content-Type': 'application/json', 'X-Merchant-Id': merchant['merchant_id'], 'X-Profile-Id': merchant['profile_id']})
@@ -193,8 +204,8 @@ class Gateway:
         try:
             with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect).open(req, timeout=20) as response:
                 result = json.loads(response.read(1024 * 1024))
-            if not isinstance(result, dict) or result.get('merchant_id') != merchant['merchant_id']:
-                raise RuntimeError('Backend merchant mismatch')
+            if not isinstance(result, dict):
+                raise ProtocolError('Invalid backend response')
             return result
         except urllib.error.HTTPError as error:
             if error.code == 404:
@@ -202,6 +213,28 @@ class Gateway:
             raise ProtocolError('Payment backend rejected request') from None
         except (urllib.error.URLError, TimeoutError):
             raise ProtocolError('Payment backend unavailable; retry same order number') from None
+
+    def backend(self, merchant, method, path, body=None):
+        result = self.backend_json(merchant, method, path, body)
+        if result is not None and (result.get('merchant_id') != merchant['merchant_id'] or result.get('profile_id') != merchant['profile_id']):
+            raise ProtocolError('Backend merchant mismatch')
+        return result
+
+    def backend_refund(self, merchant, method, path, refund, body=None):
+        # RefundResponse V1 has no merchant_id. The merchant-bound native API and
+        # these immutable ledger associations establish ownership; never relax the
+        # payment response merchant check just to accommodate a different schema.
+        result = self.backend_json(merchant, method, path, body)
+        if result is not None and (
+            result.get('refund_id') != refund['refund_no']
+            or result.get('payment_id') != refund['trade_no']
+            or result.get('amount') != refund['amount']
+            or result.get('currency') != refund['currency']
+            or result.get('merchant_id', merchant['merchant_id']) != merchant['merchant_id']
+            or result.get('profile_id') not in (None, merchant['profile_id'])
+        ):
+            raise ProtocolError('Backend refund does not match merchant order')
+        return result
 
     def create(self, params, merchant):
         for field in ('out_trade_no', 'type', 'name', 'money', 'notify_url'):
@@ -296,8 +329,150 @@ class Gateway:
                 'name': data['name'], 'param': data.get('param', ''),
                 'status': 1 if payment and payment.get('status') == 'succeeded' else 0}
 
+    @staticmethod
+    def refund_state(status):
+        # Internal transaction failures/manual review can be ambiguous. Keep their
+        # reservation until native reconciliation confirms success or failure.
+        return {'succeeded':'success', 'failed':'failure', 'success':'success', 'failure':'failure',
+                'pending':'pending', 'review':'pending', 'manual_review':'pending'}.get(str(status).lower(), 'unknown')
+
+    def native_refund_state(self, result):
+        state=self.refund_state(result.get('status'))
+        # Native timeout handling deliberately clears the error code. Its public
+        # failed status alone is insufficient evidence to free a financial hold.
+        if state=='failure' and not result.get('error_code'):
+            return 'unknown'
+        return state
+
+    def record_refund(self, row, result):
+        state = self.native_refund_state(result)
+        with self.db() as db:
+            db.execute("UPDATE refunds SET status=CASE WHEN status='success' THEN status ELSE ? END, lease_until=0, poll_due=?, updated_at=? WHERE pid=? AND out_refund_no=?",
+                       (state, int(time.time())+30, int(time.time()), row['pid'], row['out_refund_no']))
+            return db.execute('SELECT * FROM refunds WHERE pid=? AND out_refund_no=?', (row['pid'],row['out_refund_no'])).fetchone()
+
+    def refund_response(self, row, creation=False):
+        with self.db() as db:
+            order = db.execute('SELECT out_trade_no FROM orders WHERE pid=? AND trade_no=?', (row['pid'],row['trade_no'])).fetchone()
+        success = row['status'] == 'success'
+        failed = row['status'] == 'failure'
+        uncertain = row['status'] in ('created','unknown')
+        return {'code': -1 if creation and (failed or uncertain) else 0,
+                'msg': 'Refund succeeded' if success else 'Refund failed' if failed else 'Refund outcome pending; retry the same refund number or query',
+                'refund_no':row['refund_no'], 'out_refund_no':row['out_refund_no'],
+                'trade_no':row['trade_no'], 'out_trade_no':order['out_trade_no'],
+                'money':format(Decimal(row['amount'])/100,'.2f'),
+                'status':1 if success else 0 if failed else 2,
+                'refund_status':row['status'],
+                'addtime':time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(row['created_at']))}
+
+    def refund(self, params, merchant):
+        order = self.find(params)
+        payment = self.refresh(order,merchant)
+        if payment is None:
+            raise ProtocolError('Refund order is unavailable for this merchant')
+        amount = money_minor(params.get('money',''))
+        external_id = params.get('out_refund_no') or 'default_' + hashlib.sha256(order['trade_no'].encode()).hexdigest()[:32]
+        if not re.fullmatch(r'[A-Za-z0-9_.-]{1,64}', external_id):
+            raise ProtocolError('Invalid out_refund_no')
+        currency = merchant.get('currency','CNY')
+        now = int(time.time())
+        with self.db() as db:
+            prior = db.execute('SELECT * FROM refunds WHERE pid=? AND out_refund_no=?', (params['pid'],external_id)).fetchone()
+        if prior and (prior['trade_no'] != order['trade_no'] or prior['amount'] != amount or prior['currency'] != currency):
+            raise ProtocolError('Refund number already used with different order or amount')
+        if prior:
+            native = self.backend_refund(merchant,'GET','/refunds/'+prior['refund_no'],prior)
+            if native is not None:
+                return self.refund_response(self.record_refund(prior,native),True)
+            if prior['status'] in ('success','failure'):
+                return self.refund_response(prior,True)
+        if payment.get('status') not in ('succeeded','partially_captured'):
+            raise ProtocolError('Only captured payments can be refunded')
+        captured = payment.get('amount_received')
+        if captured is None and payment['status']=='succeeded':
+            captured = payment['amount']
+        if not isinstance(captured,int) or isinstance(captured,bool) or captured<=0:
+            raise ProtocolError('Captured amount unavailable')
+        captured = min(captured,money_minor(json.loads(order['params'])['money']))
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM refunds WHERE pid=? AND out_refund_no=?', (params['pid'],external_id)).fetchone()
+            if row and (row['trade_no']!=order['trade_no'] or row['amount']!=amount or row['currency']!=currency):
+                raise ProtocolError('Refund number already used with different order or amount')
+            if not row:
+                local = db.execute('SELECT refund_no,amount,status FROM refunds WHERE pid=? AND trade_no=?', (params['pid'],order['trade_no'])).fetchall()
+                known = {r['refund_no'] for r in local}
+                occupied = sum(r['amount'] for r in local if r['status']!='failure')
+                # Include refunds issued through native APIs outside this gateway.
+                for other in payment.get('refunds') or []:
+                    if other.get('refund_id') not in known and self.native_refund_state(other)!='failure':
+                        value=other.get('amount')
+                        if not isinstance(value,int) or isinstance(value,bool) or value<=0:
+                            raise ProtocolError('Native refund amount unavailable')
+                        occupied+=value
+                if amount+occupied>captured:
+                    raise ProtocolError('Refund exceeds remaining captured amount')
+                refund_no='ref_'+hashlib.sha256((params['pid']+'\0'+external_id).encode()).hexdigest()[:26]
+                db.execute('INSERT INTO refunds(pid,out_refund_no,refund_no,trade_no,amount,currency,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+                           (params['pid'],external_id,refund_no,order['trade_no'],amount,currency,now,now))
+                row=db.execute('SELECT * FROM refunds WHERE pid=? AND out_refund_no=?', (params['pid'],external_id)).fetchone()
+            if row['lease_until']>now or row['status'] in ('success','failure'):
+                return self.refund_response(row,True)
+            db.execute('UPDATE refunds SET lease_until=? WHERE pid=? AND out_refund_no=?', (now+60,params['pid'],external_id))
+        # GET first recovers a crash after native creation but before local storage.
+        # Retried POSTs use the SAME native refund_id. Native unique insertion occurs
+        # before connector execution, preventing a duplicate financial side effect.
+        try:
+            native = self.backend_refund(merchant,'GET','/refunds/'+row['refund_no'],row)
+            if native is None:
+                native=self.backend_refund(merchant,'POST','/refunds',row,{
+                    'payment_id':row['trade_no'],'refund_id':row['refund_no'],
+                    'amount':amount,'refund_type':'instant','reason':'requested_by_customer'})
+            if native is None:
+                raise ProtocolError('Refund backend unavailable')
+            row=self.record_refund(row,native)
+        except ProtocolError:
+            try:
+                native=self.backend_refund(merchant,'GET','/refunds/'+row['refund_no'],row)
+            except ProtocolError:
+                native=None
+            if native is not None:
+                row=self.record_refund(row,native)
+            else:
+                with self.db() as db:
+                    db.execute("UPDATE refunds SET status=CASE WHEN status IN ('success','failure') THEN status ELSE 'unknown' END,lease_until=0,updated_at=? WHERE pid=? AND out_refund_no=?",(now,row['pid'],row['out_refund_no']))
+                    row=db.execute('SELECT * FROM refunds WHERE pid=? AND out_refund_no=?',(row['pid'],row['out_refund_no'])).fetchone()
+        return self.refund_response(row,True)
+
+    def refund_query(self, params, merchant):
+        if bool(params.get('refund_no')) == bool(params.get('out_refund_no')):
+            raise ProtocolError('Supply exactly one refund identifier')
+        field='refund_no' if params.get('refund_no') else 'out_refund_no'
+        with self.db() as db:
+            row=db.execute(f'SELECT * FROM refunds WHERE pid=? AND {field}=?',(params['pid'],params[field])).fetchone()
+        if not row:
+            raise ProtocolError('Refund not found')
+        with self.db() as db:
+            order=db.execute('SELECT * FROM orders WHERE pid=? AND trade_no=?',(row['pid'],row['trade_no'])).fetchone()
+        if not order or self.refresh(order,merchant) is None:
+            raise ProtocolError('Refund order is unavailable for this merchant')
+        # Explicit querying may sync an existing native refund; it never creates one.
+        try:
+            native=self.backend_refund(merchant,'GET','/refunds/'+row['refund_no']+'?force_sync=true',row)
+        except ProtocolError:
+            native=None
+        if native is not None:
+            row=self.record_refund(row,native)
+        return self.refund_response(row)
+
     def handle(self, path, params):
         merchant = self.authenticate(params)
+        if path in ('/api/pay/refund','/api/pay/refundquery'):
+            allowed = set('pid timestamp sign sign_type'.split()) | (set('trade_no out_trade_no out_refund_no money'.split()) if path.endswith('/refund') else {'refund_no','out_refund_no'})
+            if set(params)-allowed:
+                raise ProtocolError('Unsupported refund parameters')
+            return self.signed(self.refund(params,merchant) if path.endswith('/refund') else self.refund_query(params,merchant))
         if path == '/api/pay/submit' and not params.get('type'):
             selected = merchant.get('default_type') or (merchant['types'][0] if len(merchant['types']) == 1 else '')
             params = dict(params, type=selected)
@@ -356,6 +531,21 @@ class Gateway:
                 # Never log URLs, personal data, credentials, request bodies or signatures.
                 continue
 
+        with self.db() as db:
+            refunds=db.execute("SELECT * FROM refunds WHERE status NOT IN ('success','failure') AND lease_until<=? AND poll_due<=? ORDER BY poll_due LIMIT 100",(int(time.time()),int(time.time()))).fetchall()
+        for row in refunds:
+            try:
+                merchant=self.merchants.get(row['pid'])
+                if not merchant:
+                    continue
+                with self.db() as db:
+                    db.execute('UPDATE refunds SET poll_due=? WHERE pid=? AND out_refund_no=?',(int(time.time())+30,row['pid'],row['out_refund_no']))
+                native=self.backend_refund(merchant,'GET','/refunds/'+row['refund_no'],row)
+                if native is not None:
+                    self.record_refund(row,native)
+            except Exception:
+                continue
+
     def worker(self):
         while not self.stop.wait(5):
             try:
@@ -387,7 +577,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not destination:
                     self.wfile.write(b'Payment has not been confirmed. Please query the order status.')
                 return
-            if parsed.path not in ('/api/pay/create', '/api/pay/submit', '/api/pay/query'):
+            if parsed.path not in ('/api/pay/create', '/api/pay/submit', '/api/pay/query', '/api/pay/refund', '/api/pay/refundquery'):
                 self.send_error(404)
                 return
             if self.command == 'GET' and parsed.path != '/api/pay/submit':

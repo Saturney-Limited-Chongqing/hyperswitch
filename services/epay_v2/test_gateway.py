@@ -200,4 +200,220 @@ class HttpTests(GatewayFixture, unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as error: urllib.request.urlopen(self.base+'/submit.php')
         self.assertEqual(error.exception.code,404)
 
+class RefundFixture(GatewayFixture):
+    def setUp(self):
+        super().setUp()
+        self.refunds={}
+        self.posted=[]
+        self.refund_creates=0
+        self.native_status='succeeded'
+        self.native_lock=threading.Lock()
+        def backend_refund(merchant,method,path,refund,body=None):
+            with self.native_lock:
+                key=(merchant['merchant_id'],refund['refund_no'])
+                if method=='GET': return self.refunds.get(key)
+                self.posted.append(dict(body))
+                if key in self.refunds: raise ProtocolError('Duplicate native refund')
+                self.refund_creates+=1
+                result={'refund_id':body['refund_id'],'payment_id':body['payment_id'],'amount':body['amount'],'currency':refund['currency'],'profile_id':merchant['profile_id'],'status':self.native_status,'error_code':'mock_decline' if self.native_status=='failed' else None}
+                self.refunds[key]=result
+                return result
+        self.normal_backend_refund=backend_refund
+        self.g.backend_refund=backend_refund
+        self.payment=self.paid()
+    def paid(self,**params):
+        payment=self.g.handle('/api/pay/create',self.params(**params))
+        native=self.payments[('a' if params.get('pid','1')=='1' else 'b',payment['trade_no'])]
+        native.update(status='succeeded',amount_received=1000,refunds=[])
+        return payment
+    def fields(self,**changes):
+        p={'pid':'1','trade_no':self.payment['trade_no'],'money':'3.00','out_refund_no':'R1','timestamp':str(int(time.time())),'sign_type':'RSA'}
+        p.update(changes)
+        p={k:v for k,v in p.items() if v is not None}
+        p['sign']=rsa_sign(p,self.root/('a.pem' if p['pid']=='1' else 'b.pem'))
+        return p
+    def refund(self,**fields):
+        return self.g.handle('/api/pay/refund',self.fields(**fields))
+    def query(self,**fields):
+        defaults={'trade_no':None,'money':None}
+        defaults.update(fields)
+        return self.g.handle('/api/pay/refundquery',self.fields(**defaults))
+class RefundTests(RefundFixture, unittest.TestCase):
+    def test_signed_partial_refund_and_query(self):
+        result=self.refund()
+        self.assertEqual((result['code'],result['status'],result['money']),(0,1,'3.00'))
+        self.assertEqual(len(result['refund_no']),30)
+        self.assertTrue(rsa_verify({k:str(v) for k,v in result.items()},self.root/'platform.pub'))
+        self.assertEqual(self.query()['refund_no'],result['refund_no'])
+        self.assertEqual(self.query(out_refund_no=None,refund_no=result['refund_no'])['status'],1)
+        self.assertEqual(self.posted[0]['payment_id'],self.payment['trade_no'])
+        self.assertEqual(self.posted[0]['amount'],300)
+    def test_partial_sum_cannot_exceed_captured_payment(self):
+        self.refund()
+        self.refund(out_refund_no='R2',money='7.00')
+        with self.assertRaises(ProtocolError): self.refund(out_refund_no='R3',money='0.01')
+        self.assertEqual(sum(v['amount'] for v in self.refunds.values()),1000)
+    def test_idempotent_refund_and_conflicting_reuse(self):
+        first=self.refund()
+        self.assertEqual(self.refund()['refund_no'],first['refund_no'])
+        self.assertEqual(self.refund_creates,1)
+        with self.assertRaises(ProtocolError): self.refund(money='4.00')
+        other=self.paid(out_trade_no='ORDER_OTHER')
+        with self.assertRaises(ProtocolError): self.refund(trade_no=other['trade_no'])
+    def test_omitted_refund_number_has_one_stable_default(self):
+        first=self.refund(out_refund_no=None)
+        self.assertTrue(first['out_refund_no'].startswith('default_'))
+        self.assertEqual(self.refund(out_refund_no=None)['refund_no'],first['refund_no'])
+        with self.assertRaises(ProtocolError): self.refund(out_refund_no=None,money='4.00')
+    def test_unpaid_or_authorized_only_cannot_refund(self):
+        for status in ('requires_capture','requires_payment_method','failed'):
+            self.payments[('a',self.payment['trade_no'])]['status']=status
+            with self.assertRaises(ProtocolError): self.refund()
+        self.assertEqual(self.refund_creates,0)
+    def test_partial_capture_uses_actual_captured_amount(self):
+        self.payments[('a',self.payment['trade_no'])].update(status='partially_captured',amount_received=400)
+        with self.assertRaises(ProtocolError): self.refund(money='5.00')
+        self.assertEqual(self.refund(money='4.00')['status'],1)
+    def test_cross_merchant_refund_and_query_denied(self):
+        result=self.refund()
+        with self.assertRaises(ProtocolError): self.refund(pid='2')
+        with self.assertRaises(ProtocolError): self.query(pid='2',out_refund_no=None,refund_no=result['refund_no'])
+        other=self.paid(pid='2')
+        second=self.refund(pid='2',trade_no=other['trade_no'])
+        self.assertNotEqual(result['refund_no'],second['refund_no'])
+        self.assertEqual(self.refund_creates,2)
+    def test_concurrent_refunds_never_exceed_captured_amount(self):
+        import concurrent.futures
+        def refund(i):
+            try: return self.refund(out_refund_no='CONCURRENT_'+str(i),money='1.00')['status']==1
+            except ProtocolError: return False
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+            results=list(pool.map(refund,range(20)))
+        self.assertEqual(sum(results),10)
+        self.assertEqual(sum(v['amount'] for v in self.refunds.values()),1000)
+    def test_same_refund_in_flight_does_not_submit_twice(self):
+        import concurrent.futures
+        entered=threading.Event();release=threading.Event()
+        def slow(merchant,method,path,row,body=None):
+            if method=='POST': entered.set();release.wait(10)
+            return self.normal_backend_refund(merchant,method,path,row,body)
+        self.g.backend_refund=slow
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(self.refund)
+            try:
+                self.assertTrue(entered.wait(5))
+                duplicate=self.refund()
+                self.assertEqual(duplicate['status'],2)
+            finally: release.set()
+            self.assertEqual(future.result()['status'],1)
+        self.assertEqual(self.refund_creates,1)
+    def test_lost_post_response_recovers_existing_native_refund(self):
+        def lost(merchant,method,path,row,body=None):
+            result=self.normal_backend_refund(merchant,method,path,row,body)
+            if method=='POST': raise ProtocolError('Lost reply after native refund')
+            return result
+        self.g.backend_refund=lost
+        self.assertEqual(self.refund()['status'],1)
+        self.assertEqual(self.refund()['status'],1)
+        self.assertEqual(self.refund_creates,1)
+    def test_timeout_before_native_creation_keeps_budget_and_retries_same_id(self):
+        attempts=[]
+        def lost(merchant,method,path,row,body=None):
+            if method=='POST': attempts.append(body['refund_id']);raise ProtocolError('Timeout')
+            return None
+        self.g.backend_refund=lost
+        first=self.refund(money='10.00')
+        self.assertEqual((first['code'],first['status']),(-1,2))
+        with self.assertRaises(ProtocolError): self.refund(out_refund_no='R2',money='0.01')
+        self.g.backend_refund=self.normal_backend_refund
+        retry=self.refund(money='10.00')
+        self.assertEqual(retry['refund_no'],attempts[0])
+        self.assertEqual(retry['status'],1)
+        self.assertEqual(self.refund_creates,1)
+    def test_pending_never_reported_success_and_query_tracks_completion(self):
+        self.native_status='pending'
+        created=self.refund()
+        self.assertEqual((created['code'],created['status']),(0,2))
+        self.assertEqual(self.query()['status'],2)
+        self.refunds[('a',created['refund_no'])]['status']='succeeded'
+        self.assertEqual(self.query()['status'],1)
+        self.assertEqual(self.refund_creates,1)
+    def test_native_failure_releases_refundable_budget_but_not_refund_id(self):
+        self.native_status='failed'
+        failed=self.refund(money='10.00')
+        self.assertEqual((failed['code'],failed['status']),(-1,0))
+        self.native_status='succeeded'
+        self.assertEqual(self.refund(money='10.00')['status'],0)
+        self.assertEqual(self.refund(out_refund_no='R2',money='10.00')['status'],1)
+    def test_native_failed_without_error_evidence_keeps_budget(self):
+        self.native_status='failed'
+        def unclear(merchant,method,path,row,body=None):
+            result=self.normal_backend_refund(merchant,method,path,row,body)
+            if result: result['error_code']=None
+            return result
+        self.g.backend_refund=unclear
+        self.assertEqual(self.refund(money='10.00')['status'],2)
+        with self.assertRaises(ProtocolError): self.refund(out_refund_no='R2',money='0.01')
+    def test_unknown_transaction_failure_keeps_budget(self):
+        self.native_status='transaction_failure'
+        first=self.refund(money='10.00')
+        self.assertEqual(first['status'],2)
+        with self.assertRaises(ProtocolError): self.refund(out_refund_no='R2',money='0.01')
+    def test_native_refunds_outside_gateway_count_against_budget(self):
+        self.payments[('a',self.payment['trade_no'])]['refunds']=[{'refund_id':'outside','amount':800,'status':'pending'}]
+        with self.assertRaises(ProtocolError): self.refund(money='3.00')
+        self.assertEqual(self.refund(money='2.00')['status'],1)
+    def test_native_refund_binding_cannot_be_substituted(self):
+        row={'refund_no':'expected','trade_no':self.payment['trade_no'],'amount':300,'currency':'USD'}
+        correct={'refund_id':'expected','payment_id':self.payment['trade_no'],'amount':300,'currency':'USD','profile_id':'profile_a','status':'success'}
+        merchant=self.g.merchants['1']
+        for changes in ({'payment_id':'other'},{'amount':301},{'currency':'EUR'},{'profile_id':'profile_b'},{'merchant_id':'b'}):
+            self.g.backend_json=lambda *args,**kwargs:dict(correct,**changes)
+            with self.assertRaises(ProtocolError): Gateway.backend_refund(self.g,merchant,'GET','/refunds/expected',row)
+    def test_pid_reassignment_cannot_expose_cached_refunds(self):
+        self.refund()
+        self.g.merchants['1'].update(merchant_id='b',profile_id='profile_b')
+        with self.assertRaises(ProtocolError): self.refund()
+        with self.assertRaises(ProtocolError): self.query()
+    def test_refund_recovery_after_gateway_restart(self):
+        with patch.object(self.g,'record_refund',side_effect=RuntimeError('simulated process crash')):
+            with self.assertRaises(RuntimeError): self.refund()
+        restarted=Gateway(self.g.config)
+        restarted.backend=self.g.backend
+        restarted.backend_refund=self.normal_backend_refund
+        result=restarted.handle('/api/pay/refundquery',self.fields(trade_no=None,money=None))
+        self.assertEqual(result['status'],1)
+        self.assertEqual(self.refund_creates,1)
+    def test_refund_signature_and_parameter_constraints(self):
+        for params in (self.fields(sign_type='MD5'),self.fields(timestamp='1000000000'),self.fields(money='-1'),self.fields(connector='stripe')):
+            with self.assertRaises(ProtocolError): self.g.handle('/api/pay/refund',params)
+        tampered=self.fields();tampered['money']='4.00'
+        with self.assertRaises(ProtocolError): self.g.handle('/api/pay/refund',tampered)
+        self.assertEqual(self.refund_creates,0)
+
+
+class RefundHttpTests(RefundFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.server=Server(('127.0.0.1',0),self.g)
+        self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
+        self.client={'api_url':'http://127.0.0.1:'+str(self.server.server_port),'pid':'1','merchant_private_key':str(self.root/'a.pem'),'platform_public_key':str(self.root/'platform.pub')}
+    def tearDown(self):
+        self.server.shutdown();self.server.server_close();self.thread.join()
+        super().tearDown()
+    def test_real_rsa_client_refund_and_refundquery(self):
+        from client import request
+        result=request(self.client,'refund',{'trade_no':self.payment['trade_no'],'out_refund_no':'HTTP1','money':'3.00'})
+        self.assertEqual((result['code'],result['status']),(0,1))
+        query=request(self.client,'refundquery',{'refund_no':result['refund_no']})
+        self.assertEqual(query['out_refund_no'],'HTTP1')
+        self.assertEqual(query['status'],1)
+        self.assertEqual(self.refund_creates,1)
+    def test_refund_http_duplicate_fields_and_md5_rejected(self):
+        for raw in (urllib.parse.urlencode(self.fields(sign_type='MD5')),urllib.parse.urlencode(self.fields())+'&pid=1'):
+            req=urllib.request.Request(self.client['api_url']+'/api/pay/refund',data=raw.encode(),headers={'Content-Type':'application/x-www-form-urlencoded'})
+            with urllib.request.urlopen(req) as response:
+                self.assertNotEqual(json.load(response)['code'],0)
+        self.assertEqual(self.refund_creates,0)
+
 if __name__=='__main__': unittest.main()
