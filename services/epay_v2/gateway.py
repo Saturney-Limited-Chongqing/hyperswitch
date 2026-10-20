@@ -273,8 +273,14 @@ class Gateway:
                            (params['pid'], params['out_trade_no'], trade_no, fingerprint, json.dumps(params), int(time.time()), return_token))
             elif not row['return_token']:
                 db.execute('UPDATE orders SET return_token=? WHERE trade_no=?', (return_token, trade_no))
-            if row and row['pay_info']:
-                return {'code': 0, 'trade_no': trade_no, 'pay_type': 'jump', 'pay_info': row['pay_info']}
+            cached_link = row['pay_info'] if row else None
+        if cached_link:
+            # A PID may be reassigned after this link was cached. Confirm that
+            # the native payment still belongs to its current merchant/profile.
+            payment = self.backend(merchant, 'GET', '/payments/' + trade_no)
+            if not payment or payment.get('amount') != amount or payment.get('currency') != business['currency']:
+                raise ProtocolError('Cached payment is unavailable for this merchant')
+            return {'code': 0, 'trade_no': trade_no, 'pay_type': 'jump', 'pay_info': cached_link}
         payment = self.backend(merchant, 'GET', '/payments/' + trade_no)
         if payment is None:
             body = {'payment_id': trade_no, 'amount': amount, 'currency': business['currency'], 'confirm': False,
@@ -517,6 +523,11 @@ class Gateway:
                         db.execute('UPDATE orders SET poll_due=? WHERE trade_no=?', (int(time.time())+15, row['trade_no']))
                     self.refresh(row, merchant)
                     continue
+                # Configuration can change after payment completion. Never sign a
+                # paid notification unless the current native binding still matches.
+                payment = self.refresh(row, merchant)
+                if not payment or payment.get('status') != 'succeeded':
+                    continue
                 p = json.loads(row['params'])
                 notification = {k: p[k] for k in ('pid', 'type', 'out_trade_no', 'name', 'money')}
                 notification.update(trade_no=row['trade_no'], trade_status='TRADE_SUCCESS', param=p.get('param', ''))
@@ -537,6 +548,10 @@ class Gateway:
             try:
                 merchant=self.merchants.get(row['pid'])
                 if not merchant:
+                    continue
+                with self.db() as db:
+                    order=db.execute('SELECT * FROM orders WHERE pid=? AND trade_no=?',(row['pid'],row['trade_no'])).fetchone()
+                if not order or self.refresh(order, merchant) is None:
                     continue
                 with self.db() as db:
                     db.execute('UPDATE refunds SET poll_due=? WHERE pid=? AND out_refund_no=?',(int(time.time())+30,row['pid'],row['out_refund_no']))

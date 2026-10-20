@@ -82,6 +82,30 @@ class GatewayTests(GatewayFixture, unittest.TestCase):
             self.g.handle('/api/pay/query',self.params(pid='2',trade_no=r['trade_no'],out_trade_no=''))
         other=self.g.handle('/api/pay/create',self.params(pid='2'))
         self.assertNotEqual(r['trade_no'],other['trade_no'])
+    def test_pid_reassignment_cannot_reuse_cached_payment_link(self):
+        self.g.handle('/api/pay/create',self.params())
+        self.g.merchants['1'].update(merchant_id='b',profile_id='profile_b')
+        with self.assertRaises(ProtocolError):
+            self.g.handle('/api/pay/create',self.params())
+    def test_pid_reassignment_stops_paid_notifications(self):
+        result=self.g.handle('/api/pay/create',self.params())
+        self.payments[('a',result['trade_no'])]['status']='succeeded'
+        self.g.tick()
+        self.g.merchants['1'].update(merchant_id='b',profile_id='profile_b')
+        with patch('gateway.send_callback') as deliver:
+            self.g.tick()
+            self.assertFalse(deliver.called)
+    def test_pid_reassignment_stops_refund_polling(self):
+        self.g.handle('/api/pay/create',self.params())
+        with self.g.db() as db:
+            order=db.execute('SELECT * FROM orders').fetchone()
+            db.execute('INSERT INTO refunds(pid,out_refund_no,refund_no,trade_no,amount,currency,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+                       ('1','R1','ref_test_reassignment',order['trade_no'],100,'USD',int(time.time()),int(time.time())))
+            db.execute('UPDATE orders SET poll_due=?',(int(time.time())+3600,))
+        self.g.merchants['1'].update(merchant_id='b',profile_id='profile_b')
+        with patch.object(self.g,'backend_refund') as native:
+            self.g.tick()
+            self.assertFalse(native.called)
     def test_only_authoritative_success_sends_notification(self):
         r=self.g.handle('/api/pay/create',self.params())
         with patch('gateway.send_callback',return_value=True) as deliver:
