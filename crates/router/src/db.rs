@@ -26,6 +26,7 @@ pub mod health_check;
 pub mod hierarchical_resource;
 pub mod kafka_store;
 pub mod locker_mock_up;
+pub mod logto_identity;
 pub mod mandate;
 pub mod merchant_account;
 pub mod merchant_connector_account;
@@ -183,6 +184,7 @@ pub trait GlobalStorageInterface:
     + Sync
     + dyn_clone::DynClone
     + user::UserInterface
+    + logto_identity::LogtoIdentityInterface
     + user_role::UserRoleInterface
     + user_key_store::UserKeyStoreInterface
     + role::RoleInterface
@@ -201,6 +203,7 @@ pub trait GlobalStorageInterface:
     + Sync
     + dyn_clone::DynClone
     + user::UserInterface
+    + logto_identity::LogtoIdentityInterface
     + user_role::UserRoleInterface
     + user_key_store::UserKeyStoreInterface
     + role::RoleInterface

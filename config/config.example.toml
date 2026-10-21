@@ -1664,6 +1664,7 @@ version = "HOSTNAME"        # value of HOSTNAME from deployment which tells its 
 # Apply channel_daily_limits migration before enabling the V1 payment quota guard.
 channel_daily_limits_enabled = false
 channel_daily_limits_require_binding = false
+logto_identity_sync_enabled = false
 # Collection-only merchants: assign collection_merchant_admin / collection_merchant_view_only
 # and register their IDs here to restrict service API keys to collection operations.
 # Platform admin credentials retain channel management access.

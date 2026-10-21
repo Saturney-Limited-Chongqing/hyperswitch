@@ -1,10 +1,10 @@
 # Logto OIDC 与后台 RBAC
 
-Logto 提供登录身份和角色分配。Hyperswitch 仍负责本地用户、商户归属与 API 权限。每次 Logto 登录必须同时满足：已验证的 OIDC ID token、管理员配置的 `sub` 绑定、Logto 角色声明、本地激活的相同角色及商户 ID。邮件地址相同不会自动关联账号，也不会自动创建用户或商户。
+Logto 提供登录身份和角色分配。Hyperswitch 仍负责本地用户、商户归属与 API 权限。每次 Logto 登录必须同时满足：已验证的 OIDC ID token、服务端 `sub` 与本地用户的显式绑定（旧静态绑定或启用后的持久化绑定）、Logto 角色声明、本地激活的相同角色及商户 ID。邮件地址相同不会自动关联账号，也不会自动创建用户或商户。
 
 在 Logto 中创建传统 Web 应用，使用 Authorization Code + PKCE，精确回调地址为 `<dashboard-base-url>/redirect/oidc/logto`。客户端请求 `openid email roles urn:logto:scope:organization_roles`。在 Console > Custom JWT 启用 ID token 的 `roles` 和 `organization_roles` 声明。生产环境应使用 HTTPS，并给需要强认证的应用设置 MFA。Logto 文档：[自定义 ID token](https://docs.logto.io/developers/custom-id-token)、[组织角色](https://docs.logto.io/end-user-flows/organization-experience/get-user-info)。
 
-Logto 全局角色名使用 `tenant_admin`。商户创建为 Logto Organization，在该组织内分配 `collection_merchant_admin` 或 `collection_merchant_view_only`。每个 Logto Organization ID 对应一个本地商户 ID；该对应关系由管理员在私有绑定文件中指定。不同商户不能共用一个绑定。给商户角色只添加全局角色不会授予商户访问权限。
+Logto 全局角色名使用 `tenant_admin`。商户所在的 Hyperswitch Organization 对应一个 Logto Organization，在该组织内分配 `collection_merchant_admin` 或 `collection_merchant_view_only`。最终商户访问范围仍由持久化身份绑定中的本地商户 ID 限定；同一用户同时拥有多个受管商户归属会被当前登录检查拒绝。旧静态绑定由管理员在私有文件中指定。给商户角色只添加全局角色不会授予商户访问权限。
 
 私有 JSON 示例（文件放在 Git 仓库外，权限设为 0600）：
 
@@ -39,15 +39,32 @@ HYPERSWITCH_API_URL=https://api.example.com HYPERSWITCH_ADMIN_KEY='<admin-key>' 
 
 Logto 角色变更影响下次登录，不会自动撤销已经签发的 Hyperswitch 会话。紧急撤权应同时停用本地账号或撤销其后台会话。此接入不自动同步 Logto 用户或角色到数据库，也不接管支付连接器。
 
-## 开户后单向同步（待实现）
+## 开户后单向同步（实验性，默认关闭）
 
 Hyperswitch 是商户、用户和组织归属的开户来源。完成本地开户后，服务端才通过 Logto Management API 创建或关联对应的 Logto Organization、用户及其组织成员关系；用户在 Logto 自行注册或被直接创建，均**不得反向创建** Hyperswitch 商户或用户。现有 OIDC `allow_signup: false` 和 `sso_sign` 的显式绑定检查应继续保留。原先讨论的“新 Logto Organization 自动建商户，统一 US / USD”方案取消；新商户使用 Hyperswitch 开户时实际确认的业务资料，不能从 Logto 组织资料推断币种或渠道配置。
 
-同步应由本地开户事务写入持久化待办事件，后台工作进程幂等处理，而不是在 HTTP 请求内串行调用 Logto。商户、用户、组织成员和身份映射分别保存状态；以本地组织 ID、用户 ID 和事件版本作为去重键。创建 Logto 用户前先查本地映射，再按受控外部 ID 查询并核对身份，绝不能只凭相同邮箱自动认领现有 Logto 账号。保存 `local_org_id ↔ logto_org_id`、`local_user_id ↔ logto_sub` 后，OIDC 登录改查持久化映射；静态 `logto_bindings` 仅用于现有账号迁移，不能与数据库映射冲突。
+同步由本地角色写入事务触发持久化待办事件，后台工作进程幂等处理，而不是在 HTTP 请求内串行调用 Logto。组织和身份映射分别保存；待办代次防止过期工作进程覆盖新状态。创建 Logto 用户前按确定的本地用户 ID 查询并核对身份，绝不能只凭相同邮箱自动认领现有 Logto 账号。保存 `local_org_id ↔ logto_org_id`、`local_user_id ↔ logto_sub` 后，OIDC 登录可查持久化映射；静态 `logto_bindings` 用于现有账号迁移，若与数据库映射冲突则拒绝登录。
 
-开户成功但 Logto 暂时不可用时，商户保持 `identity_pending`，允许平台继续配置渠道，禁止该用户通过 Logto 登录，自动重试并提供平台手动重放。同步完成、组织成员关系和预期初始角色均核对后才能标记 `identity_ready`。开户本身不自动创建 API Key、渠道账户或额度池，也不开放收款；这些仍由平台审核配置。Logto 的角色分配继续作为登录授权声明，本地 RBAC 必须同时匹配。直接在 Logto 调整角色只影响已存在的绑定用户，不触发开户；角色撤销后的既有 Hyperswitch 会话仍需单独实现失效与角色同步，不能仅靠下次登录检查。
+开户成功但 Logto 暂时不可用时，待办事件保持 `pending` 并指数退避重试；未建好持久化绑定的用户不能凭 Logto 身份进入后台。同步完成、组织成员关系和预期收款角色均核对后才写入 `ready` 绑定。开户自带的 `org_admin` 只同步普通组织成员身份，不自动赋予收款商户角色。开户本身不自动创建 API Key、渠道账户或额度池，也不开放收款；这些仍由平台审核配置。Logto 的角色分配继续作为登录授权声明，本地 RBAC 必须同时匹配。直接在 Logto 调整角色只影响已存在的绑定用户，不触发开户；角色撤销后的既有 Hyperswitch 会话仍需单独实现失效与角色同步，不能仅靠下次登录检查。
 
-Management API 凭证只存服务端私有配置，并由专用 M2M 应用取得访问令牌；Logto 提供[服务端 M2M 接入说明](https://docs.logto.io/quick-starts/m2m)及[创建用户](https://openapi.logto.io/operation/operation-createuser)、[创建组织](https://openapi.logto.io/operation/operation-createorganization)接口。当前项目尚无上述待办队列、持久化映射或自动同步实现；这段是实现契约，不代表已经上线。
+Management API 凭证只存服务端私有配置，并由专用 M2M 应用取得访问令牌；Logto 提供[服务端 M2M 接入说明](https://docs.logto.io/quick-starts/m2m)及[创建用户](https://openapi.logto.io/operation/operation-createuser)、[创建组织](https://openapi.logto.io/operation/operation-createorganization)接口。当前代码已包含全局用户库迁移、角色写入触发的持久化待办、单实例 Python 处理器及可选数据库绑定查询；部署前还需配置 M2M 应用、运行处理器并完成远端真实开户联调。平台管理员角色仍要求人工在 Logto 明确批准。撤权和旧会话失效尚未自动化。
+
+迁移 `migrations/2026-10-21-000001_logto_account_sync` 应应用到**全局用户数据库**。`user_roles` 写入 `org_admin` 或受管角色时会生成待办。服务端启用 `[platform].logto_identity_sync_enabled = true` 前，先确认迁移完成，并让处理器持续运行。处理器用私有 0600 JSON 配置启动：
+
+```json
+{
+  "db_command": ["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"],
+  "management_api_base": "https://identity.example.com",
+  "token_url": "https://identity.example.com/oidc/token",
+  "management_api_resource": "https://default.logto.app/api",
+  "m2m_client_id": "<server-side-id>",
+  "m2m_client_secret": "<server-side-secret>"
+}
+```
+
+数据库连接使用服务进程的 `PG*` 环境变量或受限的 PostgreSQL 服务文件，不能把密码写进命令参数。运行 `python3 -B scripts/logto_account_sync.py /private/logto-sync.json`；`--once` 只处理一个到期事件。Logto 临时错误会自动重试，身份冲突会留在待办表供平台排查。生产须单实例运行、记录告警并备份映射表。现有 Logto 用户要先安全迁移身份映射；处理器故意拒绝仅因邮箱相同而接管旧账号。
+
+新建 Logto 用户时不会复制 Hyperswitch 密码，也不会给用户设置 Logto 密码。若要让同步后的用户首次登录，须在 Logto 单独配置邮件验证码、邀请或其他身份验证方式；仅创建身份记录并不能完成实际登录。迁移不会自动回填既有角色，试运行前需逐个核对旧账号的 `sub` 绑定。
 
 ## 自建 Logto 调试环境
 

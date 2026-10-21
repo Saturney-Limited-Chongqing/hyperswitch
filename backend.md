@@ -66,7 +66,7 @@ V1/V2 支付执行路径可启用 `[platform].channel_daily_limits_enabled = tru
 ## 当前未完成/限制
 
 - V2 路由规划暂不提前筛除满额渠道，最终预留会拒绝超额；默认未绑定渠道仍可通过，需开启强制绑定开关并登记全部渠道。
-- Logto 角色撤销不自动撤销已有 Hyperswitch 会话；没有自动同步用户、角色或商户。后续方向改为 Hyperswitch 开户完成后单向同步组织/用户到 Logto；从 Logto 新增用户反向建档保持停用。原先讨论的反向建商户 US / USD 默认值不再适用。待办队列、持久化身份映射、动态收款权限登记和撤权机制尚未实现；详见 `docs/logto_rbac.md`。
+- Logto 单向开户同步已有实验性基础：全局用户库迁移会为 `org_admin` 及受管角色写入待办，`scripts/logto_account_sync.py` 用服务端 M2M 凭证创建 Logto 组织/用户/成员，`[platform].logto_identity_sync_enabled` 控制 OIDC 是否查询持久化绑定，默认关闭。从 Logto 新增用户反向建档保持停用；反向建商户 US / USD 默认值不再适用。生产前仍需 M2M 配置、真实开户联调、旧身份迁移、动态收款权限登记和现有会话撤权。Logto 角色撤销尚不会自动废除已经签发的 Hyperswitch 会话；详见 `docs/logto_rbac.md`。
 - 彩虹兼容仍是上文 RSA 子集，保持拒绝 MD5；已有离线对账和外部结算记录，没有资金余额、自动打款/代付账本或多实例网关高可用。
 - 外部收单成功、完整 webhook、清结算时间与平台资金账本尚不能仅由现有测试证明；实际渠道必须逐个沙箱及生产小额验证。
 - 前端的上游高级功能页面尚未全面简体中文化。

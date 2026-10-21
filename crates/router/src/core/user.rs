@@ -3250,16 +3250,28 @@ pub async fn sso_sign(
     // Rauthy identities are explicitly bound by an administrator, never linked
     // to an existing privileged account merely because the email matches.
     let logto_binding = if is_logto {
-        Some(
-            logto_bindings
-                .as_ref()
-                .and_then(|bindings| bindings.get(&identity.subject))
-                .ok_or(UserErrors::SSOFailed)?,
-        )
+        let configured = logto_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.get(&identity.subject))
+            .cloned();
+        if state.conf.platform.logto_identity_sync_enabled {
+            let persisted = state
+                .global_store
+                .find_ready_logto_binding(&identity.subject)
+                .await?;
+            if let (Some(saved), Some(static_binding)) = (&persisted, &configured) {
+                if saved != static_binding {
+                    return Err(UserErrors::SSOFailed.into());
+                }
+            }
+            Some(persisted.or(configured).ok_or(UserErrors::SSOFailed)?)
+        } else {
+            Some(configured.ok_or(UserErrors::SSOFailed)?)
+        }
     } else {
         None
     };
-    let user_from_db: domain::UserFromStorage = if let Some(binding) = logto_binding {
+    let user_from_db: domain::UserFromStorage = if let Some(binding) = &logto_binding {
         state
             .global_store
             .find_active_user_by_user_id(&binding.user_id)
@@ -3287,7 +3299,7 @@ pub async fn sso_sign(
             .into()
     };
 
-    let logto_user_role = if let Some(binding) = logto_binding {
+    let logto_user_role = if let Some(binding) = &logto_binding {
         if !logto_claim_allows_binding(binding, &identity.roles, &identity.organization_roles) {
             return Err(UserErrors::SSOFailed.into());
         }

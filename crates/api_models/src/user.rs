@@ -335,7 +335,7 @@ pub struct OpenIdConnectPrivateConfig {
     pub logto_bindings: Option<std::collections::HashMap<String, LogtoRoleBinding>>,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone, PartialEq, Eq)]
 pub struct LogtoRoleBinding {
     pub user_id: String,
     pub role_id: String,

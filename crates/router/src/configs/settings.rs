@@ -465,6 +465,9 @@ pub struct Platform {
     /// Require every charging connector account/currency to have an explicit pool binding.
     #[serde(default)]
     pub channel_daily_limits_require_binding: bool,
+    /// Look up Logto subject bindings in the global user database. Requires the Logto migration.
+    #[serde(default)]
+    pub logto_identity_sync_enabled: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
