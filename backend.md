@@ -38,6 +38,19 @@ V1 支付路径可启用 `[platform].channel_daily_limits_enabled = true`；启�
 
 原生退款仍使用 Hyperswitch `/refunds` 流程与现有连接器。兼容网关的密钥、账本路径和配置文件必须置于仓库外且权限受限；`services/epay_v2/config.example.json` 仅是模板。
 
+## 以后新增支付 Connector（例如 Antom）
+
+这里的 Connector 指 Hyperswitch 原生的**出站收单适配器**，与上面的彩虹 V2 入站网关不同。新渠道必须进入现有 `crates/hyperswitch_connectors`、路由和配置体系，不能让商户端传入直连渠道密钥，也不能绕开平台的商户边界及 V1 渠道限额。当前仓库随上游提供 `add_connector.md`，它是详细的接口/代码教程；以下是本项目的落地约定。
+
+1. **先定义能力表。** 从渠道官方协议列出支持的币种、支付方式、认证方式（卡/钱包/跳转/3DS）、同步/异步结果、授权与扣款、撤销、部分退款、退款查询、webhook 验签与重放规则。写明 V1/V2 支持范围和沙箱/生产 API 差异。以 Antom 为例，先确定接入的具体 Antom 产品和地区 API；不要把品牌名当作单一通用协议。
+2. **在独立、干净的工作树生成骨架。** 上游 `scripts/add_connector.sh <name> <sandbox-base-url>` 会修改枚举、注册表、配置、测试和模板文件，并在开头执行 `git checkout`/`rm -rf`，会覆盖相关未提交改动；它还会安装 `cargo-generate`、运行格式化/编译/测试。先阅读脚本、保存工作、确认工作树干净再运行。不要在日常有手工修改的 checkout 直接执行。脚本产物是起点，不是可上线的 Connector。
+3. **实现协议转换。** 主体位于 `crates/hyperswitch_connectors/src/connectors/<name>.rs`，请求/响应与 `TryFrom` 转换位于 `.../connectors/<name>/transformers.rs`。实现 `ConnectorCommon`（`id`、base URL、认证头、错误响应、金额单位）、所需的 `ConnectorIntegration<Flow, Request, Response>` 和 `IncomingWebhook`。常见收款流包括 `Authorize`、`PSync`、`Capture`、`Void`、`Execute`/`RSync`（退款）；只声明并实现渠道实际支持的能力，不支持的流应显式失败。`crates/hyperswitch_connectors/src/connectors/gpayments.rs` 展示当前 trait 结构，但含未实现占位，不能照搬为完成品。
+4. **注册和配置。** 核对 `crates/hyperswitch_connectors/src/connectors.rs`、`crates/router/src/connector.rs`、`crates/api_models/src/connector_enums.rs`、`crates/common_enums/src/connector_enums.rs`、`crates/hyperswitch_interfaces/src/configs.rs`、`crates/connector_configs` 和 `config/` 各环境文件；按支付方式声明可用性、凭据字段、webhook secret、沙箱/生产 base URL。具体注册点随上游版本变化，以生成后的 diff 和编译器报错为准。前端 Control Center 的展示名称、凭据表单、图标和必要的路由 WASM 也要适配，但只有平台管理员能创建/编辑渠道账户。
+5. **把安全与结果语义做完整。** 用 `Secret`/masking 包装 API 密钥和敏感字段；签名与 webhook 必须验证原始请求、时间戳/事件 ID 和密钥轮换，不能凭收到 2xx 或浏览器跳转标记付款成功。映射渠道交易 ID、幂等键、错误码、待定状态、金额/币种精度、部分扣款和退款结果；超时不能盲目切换到别的渠道重扣。`handle_response` 和 `build_error_response` 要可区分确认失败与未知结果。新增渠道账户之后，再为需要限额的 `(merchant_id, merchant_connector_id, currency)` 配置额度池；限额不能凭 Connector 名称自动生效。
+6. **逐层验收。** 在远端调试机用假服务器/协议样本覆盖签名、金额、错误和 webhook，再用渠道沙箱密钥跑真实授权、查询、退款和异步通知；执行对应 `crates/router/tests/connectors/<name>.rs`、Rust 编译、双商户隔离、渠道限额及前端平台/商户可见性回归。生产上线先由平台创建连接器账户、限定路由和日限额，再做小额真实交易与退款核对。沙箱与生产凭据都放私有配置，不能提交。
+
+为了便于合入上游安全补丁，渠道差异尽量局限在新 Connector 文件、必要注册/配置项和前端对应项；不要改通用支付执行语义来适配单一渠道。每次 `update upstream` 后核对 trait、枚举、配置生成方式与 webhook 路径，再重新编译和回归。上游指南的行号和脚手架生成内容可能随版本变化，不应当成固定 API。
+
 ## 联调、测试和升级
 
 本项目的前端在另一个仓库；后端 checkout 内的 `control-center/` 是便于联调的嵌套 checkout，`scripts/setup_collection_control_center.sh`、`config/control_center_collection_revision` 和 `patches/control-center-collection.patch` 用于重现历史前端集成。交付前端开发应以独立前端仓库 HEAD 和其 `frontend.md` 为准。
