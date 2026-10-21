@@ -39,7 +39,15 @@ HYPERSWITCH_API_URL=https://api.example.com HYPERSWITCH_ADMIN_KEY='<admin-key>' 
 
 Logto 角色变更影响下次登录，不会自动撤销已经签发的 Hyperswitch 会话。紧急撤权应同时停用本地账号或撤销其后台会话。此接入不自动同步 Logto 用户或角色到数据库，也不接管支付连接器。
 
-待实现的自动建档约定：新 Logto Organization 对应一个新 Hyperswitch 商户，新用户由 Logto `sub` 与组织 ID 确定归属，商户缺省业务国家为 `US`、缺省收款币种为 `USD`。这两个缺省值不能自动创建渠道账户、额度池或 API Key；必须在商户获得收款权限前完成平台配置。自动同步还需持久化 Logto 身份映射、在角色撤销时作废既有后台会话，并把新商户纳入动态收款权限登记。目前这些步骤尚未接入，切勿把现有静态 `logto_bindings` 当成自动同步。
+## 开户后单向同步（待实现）
+
+Hyperswitch 是商户、用户和组织归属的开户来源。完成本地开户后，服务端才通过 Logto Management API 创建或关联对应的 Logto Organization、用户及其组织成员关系；用户在 Logto 自行注册或被直接创建，均**不得反向创建** Hyperswitch 商户或用户。现有 OIDC `allow_signup: false` 和 `sso_sign` 的显式绑定检查应继续保留。原先讨论的“新 Logto Organization 自动建商户，统一 US / USD”方案取消；新商户使用 Hyperswitch 开户时实际确认的业务资料，不能从 Logto 组织资料推断币种或渠道配置。
+
+同步应由本地开户事务写入持久化待办事件，后台工作进程幂等处理，而不是在 HTTP 请求内串行调用 Logto。商户、用户、组织成员和身份映射分别保存状态；以本地组织 ID、用户 ID 和事件版本作为去重键。创建 Logto 用户前先查本地映射，再按受控外部 ID 查询并核对身份，绝不能只凭相同邮箱自动认领现有 Logto 账号。保存 `local_org_id ↔ logto_org_id`、`local_user_id ↔ logto_sub` 后，OIDC 登录改查持久化映射；静态 `logto_bindings` 仅用于现有账号迁移，不能与数据库映射冲突。
+
+开户成功但 Logto 暂时不可用时，商户保持 `identity_pending`，允许平台继续配置渠道，禁止该用户通过 Logto 登录，自动重试并提供平台手动重放。同步完成、组织成员关系和预期初始角色均核对后才能标记 `identity_ready`。开户本身不自动创建 API Key、渠道账户或额度池，也不开放收款；这些仍由平台审核配置。Logto 的角色分配继续作为登录授权声明，本地 RBAC 必须同时匹配。直接在 Logto 调整角色只影响已存在的绑定用户，不触发开户；角色撤销后的既有 Hyperswitch 会话仍需单独实现失效与角色同步，不能仅靠下次登录检查。
+
+Management API 凭证只存服务端私有配置，并由专用 M2M 应用取得访问令牌；Logto 提供[服务端 M2M 接入说明](https://docs.logto.io/quick-starts/m2m)及[创建用户](https://openapi.logto.io/operation/operation-createuser)、[创建组织](https://openapi.logto.io/operation/operation-createorganization)接口。当前项目尚无上述待办队列、持久化映射或自动同步实现；这段是实现契约，不代表已经上线。
 
 ## 自建 Logto 调试环境
 
