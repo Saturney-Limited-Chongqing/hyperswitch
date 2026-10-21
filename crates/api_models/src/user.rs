@@ -330,6 +330,19 @@ pub struct OpenIdConnectPrivateConfig {
     /// Rauthy subject -> existing local user ID. Managed only by administrators.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_bindings: Option<std::collections::HashMap<String, String>>,
+    /// Logto subject -> explicitly approved local user, role and organization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logto_bindings: Option<std::collections::HashMap<String, LogtoRoleBinding>>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+pub struct LogtoRoleBinding {
+    pub user_id: String,
+    pub role_id: String,
+    /// Logto organization ID; required for collection merchant roles.
+    pub organization_id: Option<String>,
+    /// Local merchant ID; required for collection merchant roles.
+    pub merchant_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
@@ -345,6 +358,7 @@ pub struct OpenIdConnectPublicConfig {
 pub enum OpenIdProvider {
     Okta,
     Rauthy,
+    Logto,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]

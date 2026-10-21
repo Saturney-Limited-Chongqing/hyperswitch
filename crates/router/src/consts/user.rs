@@ -46,3 +46,5 @@ pub const DEFAULT_PRODUCT_TYPE: common_enums::MerchantProductType =
 /// Browser binding for Rauthy authorization-code callbacks.
 pub const RAUTHY_STATE_COOKIE: &str = "hs_rauthy_state";
 pub const RAUTHY_STATE_COOKIE_SECURE: &str = "__Host-hs_rauthy_state";
+pub const LOGTO_STATE_COOKIE: &str = "hs_logto_state";
+pub const LOGTO_STATE_COOKIE_SECURE: &str = "__Host-hs_logto_state";

@@ -875,10 +875,18 @@ pub async fn sso_sign(
 ) -> HttpResponse {
     let flow = Flow::SignInWithSso;
     let payload = json_payload.into_inner();
-    let browser_state = req
-        .cookie(crate::consts::user::RAUTHY_STATE_COOKIE_SECURE)
-        .or_else(|| req.cookie(crate::consts::user::RAUTHY_STATE_COOKIE))
-        .map(|cookie| (cookie.name().to_owned(), cookie.value().to_owned()));
+    let browser_state = [
+        crate::consts::user::RAUTHY_STATE_COOKIE_SECURE,
+        crate::consts::user::RAUTHY_STATE_COOKIE,
+        crate::consts::user::LOGTO_STATE_COOKIE_SECURE,
+        crate::consts::user::LOGTO_STATE_COOKIE,
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        req.cookie(name)
+            .map(|cookie| (cookie.name().to_owned(), cookie.value().to_owned()))
+    })
+    .collect::<Vec<_>>();
     Box::pin(api::server_wrap(
         flow,
         state.clone(),

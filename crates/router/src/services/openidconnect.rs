@@ -1,3 +1,4 @@
+use base64::Engine;
 use common_utils::errors::ErrorSwitch;
 use error_stack::ResultExt;
 use external_services::http_client::client;
@@ -21,6 +22,7 @@ pub async fn get_authorization_url(
     base_url: Secret<String>,
     client_id: Secret<String>,
     use_pkce: bool,
+    request_logto_roles: bool,
 ) -> UserResult<url::Url> {
     let discovery_document = get_discovery_document(base_url, &state).await?;
 
@@ -33,6 +35,13 @@ pub async fn get_authorization_url(
             oidc::Nonce::new_random,
         )
         .add_scope(oidc::Scope::new("email".to_string()));
+    if request_logto_roles {
+        authorization = authorization
+            .add_scope(oidc::Scope::new("roles".to_string()))
+            .add_scope(oidc::Scope::new(
+                "urn:logto:scope:organization_roles".to_string(),
+            ));
+    }
     if let Some((challenge, _)) = &pkce {
         authorization = authorization.set_pkce_challenge(challenge.clone());
     }
@@ -66,6 +75,8 @@ pub async fn get_authorization_url(
 pub struct OidcIdentity {
     pub email: UserEmail,
     pub subject: String,
+    pub roles: Vec<String>,
+    pub organization_roles: Vec<String>,
 }
 
 pub async fn get_identity_from_oidc_provider(
@@ -77,6 +88,7 @@ pub async fn get_identity_from_oidc_provider(
     authorization_code: Secret<String>,
     client_secret: Secret<String>,
     require_verified_identity: bool,
+    parse_logto_roles: bool,
 ) -> UserResult<OidcIdentity> {
     let nonce = get_nonce_from_redis(state, &redirect_state).await?;
     let discovery_document = get_discovery_document(base_url, state).await?;
@@ -128,6 +140,34 @@ pub async fn get_identity_from_oidc_provider(
         return Err(UserErrors::SSOFailed.into());
     }
 
+    // Read extra claims only after the OIDC library has verified signature,
+    // issuer, audience, expiry and nonce above. Missing/malformed claims fail closed.
+    let (roles, organization_roles) = if parse_logto_roles {
+        let jwt = id_token.to_string();
+        let payload = jwt.split('.').nth(1).ok_or(UserErrors::SSOFailed)?;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .map_err(|_| UserErrors::SSOFailed)?;
+        let claims: serde_json::Value =
+            serde_json::from_slice(&decoded).map_err(|_| UserErrors::SSOFailed)?;
+        let read_roles = |name: &str| -> UserResult<Vec<String>> {
+            claims
+                .get(name)
+                .and_then(serde_json::Value::as_array)
+                .ok_or(UserErrors::SSOFailed)?
+                .iter()
+                .map(|role| {
+                    role.as_str()
+                        .map(str::to_owned)
+                        .ok_or(UserErrors::SSOFailed.into())
+                })
+                .collect()
+        };
+        (read_roles("roles")?, read_roles("organization_roles")?)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
     // Get email from token
     let email_from_token = id_token_claims
         .email()
@@ -150,6 +190,8 @@ pub async fn get_identity_from_oidc_provider(
     Ok(OidcIdentity {
         email,
         subject: id_token_claims.subject().as_str().to_owned(),
+        roles,
+        organization_roles,
     })
 }
 

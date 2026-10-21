@@ -3049,12 +3049,17 @@ pub async fn get_sso_auth_url(
     let redirect_url =
         utils::user::get_oidc_sso_redirect_url(&state, &open_id_public_config.name.to_string());
 
-    let browser_cookie = if open_id_public_config.name == user_api::OpenIdProvider::Rauthy {
+    let strict_oidc = matches!(
+        open_id_public_config.name,
+        user_api::OpenIdProvider::Rauthy | user_api::OpenIdProvider::Logto
+    );
+    let browser_cookie = if strict_oidc {
         let secure = state.conf.user.base_url.starts_with("https://");
-        let name = if secure {
-            consts::user::RAUTHY_STATE_COOKIE_SECURE
-        } else {
-            consts::user::RAUTHY_STATE_COOKIE
+        let name = match (open_id_public_config.name, secure) {
+            (user_api::OpenIdProvider::Logto, true) => consts::user::LOGTO_STATE_COOKIE_SECURE,
+            (user_api::OpenIdProvider::Logto, false) => consts::user::LOGTO_STATE_COOKIE,
+            (_, true) => consts::user::RAUTHY_STATE_COOKIE_SECURE,
+            (_, false) => consts::user::RAUTHY_STATE_COOKIE,
         };
         Some(format!(
             "{name}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
@@ -3072,7 +3077,8 @@ pub async fn get_sso_auth_url(
         oidc_state,
         open_id_private_config.base_url.into(),
         open_id_private_config.client_id,
-        open_id_public_config.name == user_api::OpenIdProvider::Rauthy,
+        strict_oidc,
+        open_id_public_config.name == user_api::OpenIdProvider::Logto,
     )
     .await
     .map(|url| {
@@ -3089,11 +3095,87 @@ pub async fn get_sso_auth_url(
     })
 }
 
+fn logto_claim_allows_binding(
+    binding: &user_api::LogtoRoleBinding,
+    roles: &[String],
+    organization_roles: &[String],
+) -> bool {
+    match binding.role_id.as_str() {
+        "tenant_admin" => {
+            binding.organization_id.is_none()
+                && binding.merchant_id.is_none()
+                && roles.contains(&binding.role_id)
+        }
+        "collection_merchant_admin" | "collection_merchant_view_only" => {
+            match (&binding.organization_id, &binding.merchant_id) {
+                (Some(org_id), Some(_)) => {
+                    organization_roles.contains(&format!("{org_id}:{}", binding.role_id))
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod logto_role_tests {
+    use api_models::user::LogtoRoleBinding;
+
+    use super::logto_claim_allows_binding;
+
+    #[test]
+    fn role_claims_are_scoped_to_the_bound_organization() {
+        let binding = LogtoRoleBinding {
+            user_id: "user-a".into(),
+            role_id: "collection_merchant_admin".into(),
+            organization_id: Some("org-a".into()),
+            merchant_id: Some("merchant-a".into()),
+        };
+        assert!(!logto_claim_allows_binding(
+            &binding,
+            &["collection_merchant_admin".into()],
+            &["org-b:collection_merchant_admin".into()]
+        ));
+        assert!(logto_claim_allows_binding(
+            &binding,
+            &[],
+            &["org-a:collection_merchant_admin".into()]
+        ));
+    }
+
+    #[test]
+    fn platform_role_requires_a_global_claim_and_no_merchant() {
+        let mut binding = LogtoRoleBinding {
+            user_id: "user-p".into(),
+            role_id: "tenant_admin".into(),
+            organization_id: None,
+            merchant_id: None,
+        };
+        assert!(!logto_claim_allows_binding(
+            &binding,
+            &[],
+            &["org-a:tenant_admin".into()]
+        ));
+        assert!(logto_claim_allows_binding(
+            &binding,
+            &["tenant_admin".into()],
+            &[]
+        ));
+        binding.merchant_id = Some("merchant-a".into());
+        assert!(!logto_claim_allows_binding(
+            &binding,
+            &["tenant_admin".into()],
+            &[]
+        ));
+    }
+}
+
 pub async fn sso_sign(
     state: SessionState,
     request: user_api::SsoSignInRequest,
     user_from_single_purpose_token: Option<auth::UserFromSinglePurposeToken>,
-    browser_state: Option<(String, String)>,
+    browser_state: Vec<(String, String)>,
 ) -> UserResponse<user_api::TokenResponse> {
     let authentication_method_id =
         utils::user::get_sso_id_from_redis(&state, request.state.clone()).await?;
@@ -3123,19 +3205,23 @@ pub async fn sso_sign(
     let redirect_url =
         utils::user::get_oidc_sso_redirect_url(&state, &open_id_public_config.name.to_string());
     let is_rauthy = open_id_public_config.name == user_api::OpenIdProvider::Rauthy;
-    if is_rauthy {
-        let name = if state.conf.user.base_url.starts_with("https://") {
-            consts::user::RAUTHY_STATE_COOKIE_SECURE
-        } else {
-            consts::user::RAUTHY_STATE_COOKIE
+    let is_logto = open_id_public_config.name == user_api::OpenIdProvider::Logto;
+    if is_rauthy || is_logto {
+        let name = match (is_logto, state.conf.user.base_url.starts_with("https://")) {
+            (true, true) => consts::user::LOGTO_STATE_COOKIE_SECURE,
+            (true, false) => consts::user::LOGTO_STATE_COOKIE,
+            (false, true) => consts::user::RAUTHY_STATE_COOKIE_SECURE,
+            (false, false) => consts::user::RAUTHY_STATE_COOKIE,
         };
-        if !browser_state.as_ref().is_some_and(|(cookie_name, value)| {
-            cookie_name == name && value == request.state.peek()
-        }) {
+        if !browser_state
+            .iter()
+            .any(|(cookie_name, value)| cookie_name == name && value == request.state.peek())
+        {
             return Err(UserErrors::SSOFailed.into());
         }
     }
     let subject_bindings = open_id_private_config.subject_bindings.clone();
+    let logto_bindings = open_id_private_config.logto_bindings.clone();
     let identity = openidconnect::get_identity_from_oidc_provider(
         &state,
         redirect_url,
@@ -3144,11 +3230,13 @@ pub async fn sso_sign(
         open_id_private_config.client_id,
         request.code,
         open_id_private_config.client_secret,
-        is_rauthy,
+        is_rauthy || is_logto,
+        is_logto,
     )
     .await?;
     let email = identity.email;
-    if is_rauthy && email.extract_domain()? != user_authentication_method.email_domain {
+    if (is_rauthy || is_logto) && email.extract_domain()? != user_authentication_method.email_domain
+    {
         return Err(UserErrors::SSOFailed.into());
     }
 
@@ -3161,7 +3249,24 @@ pub async fn sso_sign(
 
     // Rauthy identities are explicitly bound by an administrator, never linked
     // to an existing privileged account merely because the email matches.
-    let user_from_db: domain::UserFromStorage = if is_rauthy {
+    let logto_binding = if is_logto {
+        Some(
+            logto_bindings
+                .as_ref()
+                .and_then(|bindings| bindings.get(&identity.subject))
+                .ok_or(UserErrors::SSOFailed)?,
+        )
+    } else {
+        None
+    };
+    let user_from_db: domain::UserFromStorage = if let Some(binding) = logto_binding {
+        state
+            .global_store
+            .find_active_user_by_user_id(&binding.user_id)
+            .await
+            .to_not_found_response(UserErrors::UserNotFound)?
+            .into()
+    } else if is_rauthy {
         let user_id = subject_bindings
             .as_ref()
             .and_then(|bindings| bindings.get(&identity.subject))
@@ -3180,6 +3285,40 @@ pub async fn sso_sign(
             .await
             .to_not_found_response(UserErrors::UserNotFound)?
             .into()
+    };
+
+    let logto_user_role = if let Some(binding) = logto_binding {
+        if !logto_claim_allows_binding(binding, &identity.roles, &identity.organization_roles) {
+            return Err(UserErrors::SSOFailed.into());
+        }
+        let roles = state
+            .global_store
+            .list_user_roles_by_user_id(ListUserRolesByUserIdPayload {
+                user_id: user_from_db.get_user_id(),
+                tenant_id: &state.tenant.tenant_id,
+                org_id: None,
+                merchant_id: None,
+                profile_id: None,
+                entity_id: None,
+                version: None,
+                status: Some(UserStatus::Active),
+                limit: None,
+            })
+            .await
+            .change_context(UserErrors::InternalServerError)?;
+        let matches_binding = |role: &diesel_models::user_role::UserRole| {
+            role.role_id == binding.role_id
+                && role.merchant_id.as_ref().map(|id| id.get_string_repr())
+                    == binding.merchant_id.as_deref()
+        };
+        // A Logto-managed identity must not have another local active role that
+        // can be selected later without rechecking the external organization.
+        if roles.is_empty() || !roles.iter().all(matches_binding) {
+            return Err(UserErrors::SSOFailed.into());
+        }
+        roles.into_iter().next()
+    } else {
+        None
     };
 
     if !user_from_db.is_verified() {
@@ -3201,7 +3340,13 @@ pub async fn sso_sign(
         domain::NextFlow::from_origin(domain::Origin::SignInWithSSO, user_from_db, &state).await?
     };
 
-    let token = next_flow.get_token(&state).await?;
+    let token = if let Some(user_role) = &logto_user_role {
+        next_flow
+            .get_token_with_user_role(&state, user_role)
+            .await?
+    } else {
+        next_flow.get_token(&state).await?
+    };
     let response = user_api::TokenResponse {
         token: token.clone(),
         token_type: next_flow.get_flow().into(),
