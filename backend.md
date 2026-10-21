@@ -18,7 +18,7 @@ Logto 提供身份与角色声明；Hyperswitch 仍负责本地用户、商户�
 
 ## 渠道每日累计限额
 
-V1 支付路径可启用 `[platform].channel_daily_limits_enabled = true`；启用前必须运行 `migrations/2026-10-20-000001_channel_daily_limits`。策略键是 `(merchant_id, merchant_connector_id, currency)`；可用 `pool_id` 让多个账户共享同一额度池。限额、币种、IANA 时区、开关属于池，修改共享池会影响全部绑定渠道。未绑定渠道照旧运行；需要全覆盖时必须登记所有活动账户/币种。V2 支付路径和 external-vault proxy 执行不具备同等保证，详见 `docs/channel_limits_and_epay_v2.md`。
+V1/V2 支付执行路径可启用 `[platform].channel_daily_limits_enabled = true`；启用前必须运行 `migrations/2026-10-20-000001_channel_daily_limits`。策略键是 `(merchant_id, merchant_connector_id, currency)`；可用 `pool_id` 让多个账户共享同一额度池。限额、币种、IANA 时区、开关属于池，修改共享池会影响全部绑定渠道。`channel_daily_limits_require_binding = true` 时，未绑定的收款渠道/币种在调用渠道前被拒绝；启用前必须登记所有活动账户/币种。默认关闭该强制开关以兼容原有商户。V2 在最终执行点预留额度，但路由规划阶段暂不提前筛除额度已满的渠道。external-vault proxy 不支持该额度契约，详见 `docs/channel_limits_and_epay_v2.md`。
 
 平台管理 API（挂在默认 `/api` 基路径下）：
 
@@ -37,6 +37,8 @@ V1 支付路径可启用 `[platform].channel_daily_limits_enabled = true`；启�
 退款提交 `POST /api/pay/refund` 必须带 `trade_no` 或 `out_trade_no` 之一、正金额 `money`，建议带唯一 `out_refund_no`。它只对已捕获、属于该 PID 的付款生效，可多次部分退款但不得超过已捕获额。`out_refund_no` 在 PID 内唯一，同号同订单同金额重试复用原退款；不同参数报冲突。查询 `POST /api/pay/refundquery` 使用 `refund_no` 或 `out_refund_no` 之一。创建响应 `code=0` 仅表示请求被受理；`status=1` 才是成功，`status=0` 是确认失败，`status=2` 是待定/未知。调用方遇未知结果应查询或重试**同一退款号**，不得生成新号。网关以持久 SQLite WAL 保存订单、退款和通知状态；单份账本只运行一个网关实例，扩容前需改共享事务数据库/outbox。成功收款通知至少一次，商户按订单号去重；只有目标返回包含 `success` 的 2xx 才确认送达。浏览器 return 不是收款成功凭据。回调仅允许 HTTPS 公网地址，生产环境不能打开回环测试豁免。
 
 原生退款仍使用 Hyperswitch `/refunds` 流程与现有连接器。兼容网关的密钥、账本路径和配置文件必须置于仓库外且权限受限；`services/epay_v2/config.example.json` 仅是模板。
+
+`services/epay_v2/reconciliation.py` 增加离线对账和外部结算**记录**：按网关已确认收款/退款生成指定时间段的明细、总额、净额和摘要；人工核对银行或处理方账单后，可登记外部流水号及证据。记录不可修改，并拒绝同一商户重叠时间段。它不发起打款、不产生可提现余额，也不代表本系统持有资金；历史交易缺少可核验币种/退款确认时间时会拒绝生成报表。操作见 `docs/channel_limits_and_epay_v2.md`。彩虹入站接口仍只接受 RSA，新旧客户端均不能降级为 MD5。
 
 ## 以后新增支付 Connector（例如 Antom）
 
@@ -63,8 +65,8 @@ V1 支付路径可启用 `[platform].channel_daily_limits_enabled = true`；启�
 
 ## 当前未完成/限制
 
-- V2 支付路径未接入渠道日限额；未绑定渠道不受限。需要以配置和路由准入策略保证实际覆盖。
-- Logto 角色撤销不自动撤销已有 Hyperswitch 会话；没有自动同步用户、角色或商户。
-- 彩虹兼容仅是上文 RSA 子集，没有 MD5 降级、余额/结算/代付账本，也没有多实例网关高可用。
+- V2 路由规划暂不提前筛除满额渠道，最终预留会拒绝超额；默认未绑定渠道仍可通过，需开启强制绑定开关并登记全部渠道。
+- Logto 角色撤销不自动撤销已有 Hyperswitch 会话；没有自动同步用户、角色或商户。未来自动建档的默认业务国家/币种已确定为 US / USD，但自动建档、动态收款权限登记与撤权机制尚未实现；详见 `docs/logto_rbac.md`。
+- 彩虹兼容仍是上文 RSA 子集，保持拒绝 MD5；已有离线对账和外部结算记录，没有资金余额、自动打款/代付账本或多实例网关高可用。
 - 外部收单成功、完整 webhook、清结算时间与平台资金账本尚不能仅由现有测试证明；实际渠道必须逐个沙箱及生产小额验证。
 - 前端的上游高级功能页面尚未全面简体中文化。

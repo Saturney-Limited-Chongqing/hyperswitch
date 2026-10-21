@@ -142,7 +142,7 @@ class Gateway:
             PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS orders (
               pid TEXT NOT NULL, out_trade_no TEXT NOT NULL, trade_no TEXT NOT NULL UNIQUE,
-              fingerprint TEXT NOT NULL, params TEXT NOT NULL, pay_info TEXT, return_token TEXT,
+              fingerprint TEXT NOT NULL, params TEXT NOT NULL, currency TEXT, pay_info TEXT, return_token TEXT,
               status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, poll_due INTEGER NOT NULL DEFAULT 0,
               paid_at INTEGER, notification_attempts INTEGER NOT NULL DEFAULT 0,
               notification_due INTEGER NOT NULL DEFAULT 0, notification_done INTEGER NOT NULL DEFAULT 0,
@@ -154,14 +154,19 @@ class Gateway:
               trade_no TEXT NOT NULL REFERENCES orders(trade_no), amount INTEGER NOT NULL CHECK(amount>0),
               currency TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'created',
               lease_until INTEGER NOT NULL DEFAULT 0, poll_due INTEGER NOT NULL DEFAULT 0,
-              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, confirmed_at INTEGER,
               PRIMARY KEY(pid,out_refund_no));
             CREATE INDEX IF NOT EXISTS refunds_order ON refunds(pid,trade_no);
             ''')
             columns = {row[1] for row in db.execute('PRAGMA table_info(orders)')}
             if 'return_token' not in columns:
                 db.execute('ALTER TABLE orders ADD COLUMN return_token TEXT')
+            if 'currency' not in columns:
+                db.execute('ALTER TABLE orders ADD COLUMN currency TEXT')
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS orders_return_token ON orders(return_token)')
+            refund_columns = {row[1] for row in db.execute('PRAGMA table_info(refunds)')}
+            if 'confirmed_at' not in refund_columns:
+                db.execute('ALTER TABLE refunds ADD COLUMN confirmed_at INTEGER')
         os.chmod(self.db_path, 0o600)
         self.stop = threading.Event()
 
@@ -269,8 +274,8 @@ class Gateway:
                 raise ProtocolError('Order number already used with different fields')
             return_token = row['return_token'] if row and row['return_token'] else secrets.token_urlsafe(32)
             if not row:
-                db.execute('INSERT INTO orders(pid,out_trade_no,trade_no,fingerprint,params,created_at,return_token) VALUES(?,?,?,?,?,?,?)',
-                           (params['pid'], params['out_trade_no'], trade_no, fingerprint, json.dumps(params), int(time.time()), return_token))
+                db.execute('INSERT INTO orders(pid,out_trade_no,trade_no,fingerprint,params,currency,created_at,return_token) VALUES(?,?,?,?,?,?,?,?)',
+                           (params['pid'], params['out_trade_no'], trade_no, fingerprint, json.dumps(params), business['currency'], int(time.time()), return_token))
             elif not row['return_token']:
                 db.execute('UPDATE orders SET return_token=? WHERE trade_no=?', (return_token, trade_no))
             cached_link = row['pay_info'] if row else None
@@ -353,8 +358,9 @@ class Gateway:
     def record_refund(self, row, result):
         state = self.native_refund_state(result)
         with self.db() as db:
-            db.execute("UPDATE refunds SET status=CASE WHEN status='success' THEN status ELSE ? END, lease_until=0, poll_due=?, updated_at=? WHERE pid=? AND out_refund_no=?",
-                       (state, int(time.time())+30, int(time.time()), row['pid'], row['out_refund_no']))
+            now = int(time.time())
+            db.execute("UPDATE refunds SET status=CASE WHEN status='success' THEN status ELSE ? END, confirmed_at=CASE WHEN ?='success' THEN COALESCE(confirmed_at,?) ELSE confirmed_at END, lease_until=0, poll_due=?, updated_at=? WHERE pid=? AND out_refund_no=?",
+                       (state, state, now, now+30, now, row['pid'], row['out_refund_no']))
             return db.execute('SELECT * FROM refunds WHERE pid=? AND out_refund_no=?', (row['pid'],row['out_refund_no'])).fetchone()
 
     def refund_response(self, row, creation=False):

@@ -1,9 +1,10 @@
-//! Central V1 payment guard; connector implementations remain untouched.
+//! Shared payment guard for V1 and V2; connector implementations remain untouched.
+use serde_json::{json, Value};
+
 use crate::{
     core::errors::{ApiErrorResponse, RouterResult},
     routes::SessionState,
 };
-use serde_json::{json, Value};
 
 pub fn reserves(flow: &str) -> bool {
     !matches!(
@@ -36,7 +37,10 @@ pub async fn reserve(state: &SessionState, payload: Value) -> RouterResult<()> {
         .store
         .channel_limit_command("reserve", payload)
         .await?;
-    if outcome.get("allowed").and_then(Value::as_bool) != Some(true) {
+    if !reservation_allowed(
+        &outcome,
+        state.conf.platform.channel_daily_limits_require_binding,
+    ) {
         return Err(ApiErrorResponse::PreconditionFailed {
             message: "Channel daily quota unavailable; payment was not submitted to this channel"
                 .to_owned(),
@@ -44,6 +48,11 @@ pub async fn reserve(state: &SessionState, payload: Value) -> RouterResult<()> {
         .into());
     }
     Ok(())
+}
+
+fn reservation_allowed(outcome: &Value, require_binding: bool) -> bool {
+    outcome.get("allowed").and_then(Value::as_bool) == Some(true)
+        && (!require_binding || outcome.get("managed").and_then(Value::as_bool) == Some(true))
 }
 
 pub async fn settle(
@@ -92,6 +101,18 @@ fn settlement_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unbound_channels_are_denied_when_binding_is_required() {
+        let unbound = json!({"allowed": true, "managed": false});
+        let bound = json!({"allowed": true, "managed": true});
+        assert!(reservation_allowed(&unbound, false));
+        assert!(!reservation_allowed(&unbound, true));
+        assert!(reservation_allowed(&bound, true));
+        assert!(!reservation_allowed(
+            &json!({"allowed": false, "managed": true}),
+            true
+        ));
+    }
     #[test]
     fn guard_charge_flows_and_skip_read_only_sync() {
         for flow in [

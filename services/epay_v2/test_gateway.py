@@ -263,6 +263,18 @@ class RefundFixture(GatewayFixture):
         defaults.update(fields)
         return self.g.handle('/api/pay/refundquery',self.fields(**defaults))
 class RefundTests(RefundFixture, unittest.TestCase):
+    def test_reconciliation_fields_keep_verified_currency_and_first_refund_confirmation(self):
+        self.assertEqual(self.refund()['status'], 1)
+        with self.g.db() as db:
+            order = db.execute('SELECT currency FROM orders WHERE trade_no=?', (self.payment['trade_no'],)).fetchone()
+            first = db.execute('SELECT confirmed_at FROM refunds WHERE pid=? AND out_refund_no=?', ('1', 'R1')).fetchone()
+        self.assertEqual(order['currency'], 'USD')
+        self.assertIsNotNone(first['confirmed_at'])
+        self.query()
+        with self.g.db() as db:
+            again = db.execute('SELECT confirmed_at FROM refunds WHERE pid=? AND out_refund_no=?', ('1', 'R1')).fetchone()
+        self.assertEqual(again['confirmed_at'], first['confirmed_at'])
+
     def test_signed_partial_refund_and_query(self):
         result=self.refund()
         self.assertEqual((result['code'],result['status'],result['money']),(0,1,'3.00'))

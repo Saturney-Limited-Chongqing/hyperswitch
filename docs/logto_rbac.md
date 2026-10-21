@@ -39,6 +39,8 @@ HYPERSWITCH_API_URL=https://api.example.com HYPERSWITCH_ADMIN_KEY='<admin-key>' 
 
 Logto 角色变更影响下次登录，不会自动撤销已经签发的 Hyperswitch 会话。紧急撤权应同时停用本地账号或撤销其后台会话。此接入不自动同步 Logto 用户或角色到数据库，也不接管支付连接器。
 
+待实现的自动建档约定：新 Logto Organization 对应一个新 Hyperswitch 商户，新用户由 Logto `sub` 与组织 ID 确定归属，商户缺省业务国家为 `US`、缺省收款币种为 `USD`。这两个缺省值不能自动创建渠道账户、额度池或 API Key；必须在商户获得收款权限前完成平台配置。自动同步还需持久化 Logto 身份映射、在角色撤销时作废既有后台会话，并把新商户纳入动态收款权限登记。目前这些步骤尚未接入，切勿把现有静态 `logto_bindings` 当成自动同步。
+
 ## 自建 Logto 调试环境
 
 使用 Logto 官方容器镜像和独立、持久化的 PostgreSQL 数据库。Logto 核心服务默认在容器内监听 3001，管理控制台监听 3002；设置 `DB_URL`、`ENDPOINT` 和 `ADMIN_ENDPOINT`，并把公开地址限定在可信内网或 HTTPS 反向代理。首次启动执行 `npm run cli db seed -- --swe`，随后运行 `npm start`。不要使用每次启动都会清空数据库的演示 Compose 配置。完成后检查 `<ENDPOINT>/oidc/.well-known/openid-configuration` 返回的 `issuer`，将其原样写入私有绑定文件。参考 [Logto OSS 部署文档](https://docs.logto.io/logto-oss/get-started-with-oss)。

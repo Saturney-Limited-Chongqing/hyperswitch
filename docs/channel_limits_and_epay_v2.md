@@ -1,6 +1,6 @@
 # Channel daily limits and EPay V2 ingress
 
-This extension targets the current Hyperswitch **V1** payment execution path. It does not change payment connectors. The optional EPay gateway is an independent, RSA-only ingress service using the native merchant payment API. It is not an outbound connector to another EPay platform.
+This extension guards V1 and V2 payment connector execution through the same PostgreSQL quota pools. It does not change payment connectors. The optional EPay gateway is an independent, RSA-only ingress service using the native V1 merchant payment API. It is not an outbound connector to another EPay platform.
 
 ## Channel quota execution
 
@@ -9,13 +9,14 @@ Apply `migrations/2026-10-20-000001_channel_daily_limits` in each tenant's payme
 ```toml
 [platform]
 channel_daily_limits_enabled = true
+channel_daily_limits_require_binding = true # optional fail-closed admission for unbound channels
 ```
 
-When disabled, existing payment traffic does not query the quota tables. When enabled, quota storage errors fail closed. Payment execution requires a resolved merchant connector account. External-vault proxy execution is explicitly refused while this flag is enabled because that alternate executor does not yet implement the reservation contract; there is no unguarded proxy fallback. This extension does not cover V2 payment execution; do not enable V2 traffic expecting these guards to apply.
+When disabled, existing payment traffic does not query the quota tables. When enabled, quota storage errors fail closed. Payment execution requires a resolved merchant connector account. External-vault proxy execution is explicitly refused while this flag is enabled because that alternate executor does not yet implement the reservation contract; there is no unguarded proxy fallback. V1 and V2 both reserve at the final connector execution point.
 
 Quota policies are bound to `(merchant_id, merchant_connector_id, currency)`. A `pool_id` may deliberately be shared by multiple merchant connector accounts using the same upstream account. Limits, currency, timezone and enabled state belong to that pool. Disabling or changing the limit of a shared pool affects **all** its members.
 
-An unbound channel keeps its existing behavior. A bound channel rejects unconfigured currencies. To enforce limits for every channel, register every active account/currency pair before admitting traffic; enrolling a merchant in collection isolation does not itself provision quota policies.
+An unbound channel keeps its existing behavior when `channel_daily_limits_require_binding` is false. Setting that flag true rejects every unbound charging account/currency before connector execution; a bound channel also rejects unconfigured currencies. To enforce limits for every channel, register every active account/currency pair before enabling the flag; enrolling a merchant in collection isolation does not itself provision quota policies. V2 uses the same final reservation and settlement checks, but does not yet exclude exhausted channels during its earlier route planning; a selected full channel is rejected before its charging call rather than silently re-routed. Read-only and refund flows do not reserve new capacity.
 
 Both a platform administrative key and a tenant-level dashboard JWT with `TenantAccountWrite` permission may manage policies. Merchant keys and merchant dashboard roles cannot. Endpoints:
 
@@ -43,7 +44,7 @@ The CLI `scripts/channel_limits.py` reads `HYPERSWITCH_PLATFORM_TOKEN` or `HYPER
 
 ### Accounting and failure semantics
 
-The router excludes unavailable channels during route planning and atomically reserves the selected channel **before** connector preparation/calls. Each PostgreSQL pool row serializes concurrent admissions across processes and merchants. `(merchant_id, attempt_id, merchant_connector_id)` makes same-day reservation retries idempotent; changing the amount of an existing reservation is refused. Incremental authorization that increases the reserved amount is consequently refused for a managed channel.
+V1 route planning excludes unavailable channels; V2 currently checks the selected channel only at final execution. Both atomically reserve the selected channel **before** connector preparation/calls. Each PostgreSQL pool row serializes concurrent admissions across processes and merchants. `(merchant_id, attempt_id, merchant_connector_id)` makes same-day reservation retries idempotent; changing the amount of an existing reservation is refused. Incremental authorization that increases the reserved amount is consequently refused for a managed channel.
 
 The guard counts the total attempt amount, including amounts represented in the attempt's net total. Read-only sync and void flows do not acquire new reservations. Confirmed charged/partially charged results commit the full reservation conservatively. A positively confirmed void or definite authorization/authentication decline may release a reservation. Transport errors, ambiguous timeouts, 5xx, 408, 409, 425 and 429 keep the reservation. Refunds never restore a committed allowance. Partial capture keeps the original full reserved amount rather than releasing unused capacity prematurely.
 
@@ -104,6 +105,22 @@ The included `client.py` is an RSA-only command-line client. Its private configu
 `POST /api/pay/refundquery` takes exactly one of `refund_no` / `out_refund_no`. It checks the PID-scoped mapping and current native payment ownership, then uses native refund retrieval with `force_sync=true`. Refund results are checked against immutable payment ID, amount, currency and profile fields. Native V1 refund responses do not contain a merchant ID; this does not weaken the separate merchant/profile checks on payment responses.
 
 Responses include `refund_no`, `out_refund_no`, `trade_no`, `out_trade_no`, `money`, `status`, `refund_status`, `addtime` (UTC), timestamp and RSA signature. Creation `code=0` means accepted, **not necessarily refunded**. Only `status=1` means confirmed success. `status=0` means confirmed failure; `status=2` is the explicit pending/uncertain extension, so asynchronous refunds are never mislabeled successful or failed. Query `code=0` means the query succeeded. Unknown creation outcomes return `code=-1` with `status=2` and the original refund identifiers; retry/query that same operation instead of generating a new refund number. No `reducemoney` balance/fee claim is fabricated: the gateway has no merchant balance or fee ledger.
+
+### Reconciliation and external settlement register
+
+`services/epay_v2/reconciliation.py` provides an offline, operator-only statement from **confirmed** gateway payments and refunds. It groups events by the gateway's recorded success timestamps, not the upstream processor's bank-settlement date. Amounts are integer minor units; pending/unknown results are excluded. Newly recorded orders preserve currency and newly confirmed refunds preserve their first success timestamp. A historical paid order without a verified currency or historical successful refund without a confirmation timestamp stops reporting until independently reconciled. This tool does not expose a merchant balance or initiate transfers.
+
+With a private SQLite ledger, an operator may run `statement` for a timezone-aware half-open period, then `record` after checking an **external** bank/processor statement. `record` requires an external reference and evidence, stores gross charges, confirmed refunds, net amount, a SHA-256 event manifest, and the period in an immutable SQLite table. Overlapping periods for the same PID are rejected. The record asserts only that the operator matched an external settlement; it is not proof that the gateway held or transferred funds. Keep the ledger and its backups private and retain the external statement independently.
+
+```sh
+python3 services/epay_v2/reconciliation.py --database /private/epay/ledger.db \
+  --pid 10001 --currency USD --from 2026-10-20T00:00:00Z --to 2026-10-21T00:00:00Z statement
+python3 services/epay_v2/reconciliation.py --database /private/epay/ledger.db \
+  --pid 10001 --currency USD --from 2026-10-20T00:00:00Z --to 2026-10-21T00:00:00Z \
+  record --external-reference BANK-123 --evidence 'Matched against processor settlement BANK-123'
+```
+
+The RSA-only protocol remains unchanged: no MD5 fallback or downgrade is introduced.
 
 The SQLite ledger serializes new refund admissions and counts successful, in-flight and unknown refunds against captured funds. Known native refunds created outside the gateway also count; native refund validation remains authoritative for direct native API activity. A short durable submission lease avoids simultaneous identical submissions. Definitive native failures may free refund capacity, but not the operation's ID. Transport errors, missing responses, unknown internal states, and native failed results without an error code keep capacity reserved. A background reader reconciles existing native refunds; it does not create new refunds. Refunds never restore the channel's daily collection allowance.
 

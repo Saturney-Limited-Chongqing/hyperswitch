@@ -462,6 +462,9 @@ pub struct Platform {
     /// Enable only after applying the channel_daily_limits migration. Fail closed on storage errors.
     #[serde(default)]
     pub channel_daily_limits_enabled: bool,
+    /// Require every charging connector account/currency to have an explicit pool binding.
+    #[serde(default)]
+    pub channel_daily_limits_require_binding: bool,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
