@@ -57,7 +57,7 @@ V1/V2 支付执行路径可启用 `[platform].channel_daily_limits_enabled = tru
 
 本项目的前端在另一个仓库；后端 checkout 内的 `control-center/` 是便于联调的嵌套 checkout，`scripts/setup_collection_control_center.sh`、`config/control_center_collection_revision` 和 `patches/control-center-collection.patch` 用于重现历史前端集成。交付前端开发应以独立前端仓库 HEAD 和其 `frontend.md` 为准。
 
-远端调试机 `flan@10.100.100.22`：后端源码 `/home/flan/Projects/hyperswitch`，前端源码 `/home/flan/Projects/hyperswitch-control-center`；私有测试配置在 `/home/flan/Projects/hyperswitch-debug`。当前 Logto 后端监听远端 `127.0.0.1:18082`，前端供 ZeroTier 浏览器访问 `10.100.100.22:19001`，Logto core/Console 分别为 `:18092`/`:18093`。旧 Rauthy/原调试服务使用独立端口；这些地址不是生产合同。远端私有配置、夹具与数据库不进 Git。构建和测试继续在远端完成，避免本机安装 Redis/PostgreSQL 等依赖。
+远端调试机 `flan@10.100.100.22`：后端源码 `/home/flan/Projects/hyperswitch`，前端源码 `/home/flan/Projects/hyperswitch-control-center`；私有测试配置在 `/home/flan/Projects/hyperswitch-debug`。当前 Logto 后端监听远端 `127.0.0.1:18082`，前端供 ZeroTier 浏览器访问 `10.100.100.22:19001`，Logto core/Console 分别为 `:18092`/`:18093`。debug Router 处理后台商户列表时需要以 `RUST_MIN_STACK=16777216` 启动，避免未优化构建的 Actix 工作线程栈溢出；正式发布仍应使用 release 构建并做同一路径的负载回归。旧 Rauthy/原调试服务使用独立端口；这些地址不是生产合同。远端私有配置、夹具与数据库不进 Git。构建和测试继续在远端完成，避免本机安装 Redis/PostgreSQL 等依赖。
 
 回归入口：`scripts/test_collection_isolation.py`（双商户隔离）、`scripts/test_channel_limits.py`（并发/跨日/共享池）、`scripts/test_collection_payment_features.py`（真实本地 API 与签名入口）、`scripts/test_epay_refunds.py`（回环模拟连接器退款）、`services/epay_v2/test_gateway.py`（协议/通知）、前端 `./test.sh` 及浏览器隔离测试。支付功能测试不应误连真实收单渠道；生产渠道上线前另做沙箱支付、webhook 和结算日核对。已验证的测试条件及局限详见 `docs/collection_merchant_dashboards.md`、`docs/channel_limits_and_epay_v2.md`。
 
