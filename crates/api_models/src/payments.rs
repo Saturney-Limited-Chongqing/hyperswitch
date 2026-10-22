@@ -10147,6 +10147,8 @@ pub struct RedirectionResponse {
 #[derive(Debug, serde::Serialize, PartialEq, Eq, serde::Deserialize)]
 pub struct RedirectionResponse {
     pub return_url_with_query_params: String,
+    #[serde(skip)]
+    pub headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, serde::Deserialize)]

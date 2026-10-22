@@ -2913,6 +2913,86 @@ impl Verify {
 
 pub struct UserDeprecated;
 
+/// The current Control Center can request the deprecated V2 user-list paths
+/// while the rest of the dashboard still uses V1 APIs.
+#[cfg(all(feature = "olap", feature = "v1"))]
+pub struct UserV2Compat;
+
+#[cfg(all(feature = "olap", feature = "v1"))]
+impl UserV2Compat {
+    pub fn server(state: AppState) -> Scope {
+        web::scope("/v2/user")
+            .app_data(web::Data::new(state))
+            .service(
+                web::scope("/list")
+                    .service(
+                        web::resource("/merchant")
+                            .route(web::get().to(user::list_merchants_for_user_in_org)),
+                    )
+                    .service(
+                        web::resource("/profile")
+                            .route(web::get().to(user::list_profiles_for_user_in_org_and_merchant)),
+                    ),
+            )
+            .service(
+                web::scope("/switch")
+                    .service(
+                        web::resource("/merchant")
+                            .route(web::post().to(user::switch_merchant_for_user_in_org)),
+                    )
+                    .service(
+                        web::resource("/profile").route(
+                            web::post().to(user::switch_profile_for_user_in_org_and_merchant),
+                        ),
+                    ),
+            )
+    }
+}
+
+/// Control Center keeps the authentication bootstrap and OIDC callback on the
+/// unversioned `/user` paths even when its business APIs use V2.
+#[cfg(all(feature = "olap", feature = "v2"))]
+pub struct UserAuth;
+
+#[cfg(all(feature = "olap", feature = "v2"))]
+impl UserAuth {
+    pub fn server(state: AppState) -> Scope {
+        web::scope("/user")
+            .app_data(web::Data::new(state))
+            .service(web::resource("").route(web::get().to(user::get_active_user_details)))
+            .service(web::resource("/oidc").route(web::post().to(user::sso_sign)))
+            .service(web::resource("/signout").route(web::post().to(user::signout)))
+            .service(
+                web::resource("/merchant_details")
+                    .route(web::get().to(user::get_user_merchant_details)),
+            )
+            .service(
+                web::scope("/list").service(
+                    web::resource("/merchant")
+                        .route(web::get().to(user::list_merchants_for_user_in_org)),
+                ),
+            )
+            .service(
+                web::scope("/role").service(
+                    web::resource("/v2").route(
+                        web::get().to(user_role::get_groups_and_resources_for_role_from_token),
+                    ),
+                ),
+            )
+            .service(
+                web::scope("/auth")
+                    .service(
+                        web::resource("/list")
+                            .route(web::get().to(user::list_user_authentication_methods)),
+                    )
+                    .service(web::resource("/url").route(web::get().to(user::get_sso_auth_url)))
+                    .service(
+                        web::resource("/select").route(web::post().to(user::terminate_auth_select)),
+                    ),
+            )
+    }
+}
+
 #[cfg(all(feature = "olap", feature = "v2"))]
 impl UserDeprecated {
     pub fn server(state: AppState) -> Scope {

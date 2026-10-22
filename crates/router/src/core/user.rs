@@ -3015,7 +3015,6 @@ pub async fn list_user_authentication_methods(
     ))
 }
 
-#[cfg(feature = "v1")]
 pub async fn get_sso_auth_url(
     state: SessionState,
     request: user_api::GetSsoAuthUrlRequest,
@@ -3082,16 +3081,24 @@ pub async fn get_sso_auth_url(
     )
     .await
     .map(|url| {
-        ApplicationResponse::JsonForRedirection(RedirectionResponse {
-            headers: browser_cookie
-                .into_iter()
-                .map(|value| ("Set-Cookie".to_owned(), value))
-                .collect(),
+        let headers = browser_cookie
+            .into_iter()
+            .map(|value| ("Set-Cookie".to_owned(), value))
+            .collect();
+        #[cfg(feature = "v1")]
+        let response = RedirectionResponse {
+            headers,
             return_url: String::new(),
             http_method: String::new(),
             params: Vec::with_capacity(0),
             return_url_with_query_params: url.to_string(),
-        })
+        };
+        #[cfg(feature = "v2")]
+        let response = RedirectionResponse {
+            headers,
+            return_url_with_query_params: url.to_string(),
+        };
+        ApplicationResponse::JsonForRedirection(response)
     })
 }
 

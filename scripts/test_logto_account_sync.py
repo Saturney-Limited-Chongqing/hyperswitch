@@ -1,6 +1,6 @@
 import unittest
 
-from logto_account_sync import Database, Logto, sql_value
+from logto_account_sync import Database, Logto, logto_username, sql_value
 
 
 class FakeDatabase:
@@ -38,8 +38,12 @@ class FakeLogto(Logto):
         self.calls.append((method, path, body))
         if path.startswith('/api/users/') and method == 'GET':
             return self.user
+        if path.startswith('/api/users/') and method == 'PATCH':
+            self.user.update(body)
+            return self.user
         if path == '/api/users' and method == 'POST':
             self.user = {'id': body['id'], 'primaryEmail': body['primaryEmail'],
+                         'username': body['username'],
                          'customData': body['customData']}
             return self.user
         if path.startswith('/api/organizations?page='):
@@ -69,7 +73,17 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(sum(method == 'POST' and path == '/api/organizations'
                              for method, path, _ in self.logto.calls), 1)
         self.assertEqual(self.db.finished[-1], (1, 'hs_user', 'org_logto'))
+        self.assertEqual(self.logto.user['username'], logto_username('hs_user'))
         self.assertNotIn('password', str(self.logto.calls).lower())
+
+    def test_existing_managed_user_without_username_is_repaired(self):
+        self.logto.user = {'id':'hs_user', 'primaryEmail':'merchant@example.com',
+                           'username':None,
+                           'customData':{'hyperswitch_user_id':'hs_user'}}
+        self.logto.provision(self.db, self.item)
+        self.assertEqual(self.logto.user['username'], logto_username('hs_user'))
+        self.assertEqual(sum(method == 'PATCH' and path == '/api/users/hs_user'
+                             for method, path, _ in self.logto.calls), 1)
 
     def test_existing_email_with_wrong_id_cannot_be_claimed(self):
         self.logto.user = {'id':'other_user', 'primaryEmail':'merchant@example.com',

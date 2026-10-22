@@ -27,8 +27,9 @@ try:
     sql(f'CREATE SCHEMA {schema}; SET search_path TO {schema}; '
         'CREATE TABLE users(user_id VARCHAR(64) UNIQUE, email TEXT, name TEXT, '
         'is_verified BOOLEAN DEFAULT FALSE, is_active BOOLEAN DEFAULT TRUE); '
+        "CREATE TYPE \"UserStatus\" AS ENUM ('active','invitation_sent'); "
         'CREATE TABLE user_roles(id SERIAL PRIMARY KEY,user_id VARCHAR(64),org_id VARCHAR(64),'
-        'merchant_id VARCHAR(64),role_id VARCHAR(64),status VARCHAR(64)); '
+        'merchant_id VARCHAR(64),role_id VARCHAR(64),status "UserStatus"); '
         "INSERT INTO users VALUES ('u1','u1@example.com','User One');")
     migration = Path(__file__).resolve().parents[1] / 'migrations/2026-10-21-000001_logto_account_sync/up.sql'
     sql(migration.read_text())
@@ -41,9 +42,9 @@ try:
     sql("INSERT INTO logto_identity_binding(local_user_id,local_org_id,local_merchant_id,"
         "logto_subject,logto_organization_id,role_id) VALUES "
         "('u1','o1','m1','logto_u1','logto_o1','collection_merchant_admin');")
-    sql("UPDATE user_roles SET status='inactive' WHERE id=1;")
+    sql("UPDATE user_roles SET status='invitation_sent' WHERE id=1;")
     second = json.loads(sql('SELECT row_to_json(o) FROM logto_sync_outbox o;'))
-    assert (second['generation'], second['role_status'], second['state']) == (3, 'inactive', 'pending')
+    assert (second['generation'], second['role_status'], second['state']) == (3, 'invitation_sent', 'pending')
     assert sql("SELECT status FROM logto_identity_binding WHERE local_user_id='u1';") == 'disabled'
     sql("INSERT INTO user_roles(user_id,org_id,merchant_id,role_id,status) VALUES "
         "('u1','o1','m1','ordinary_user','active');")

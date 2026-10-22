@@ -57,7 +57,7 @@ BEGIN
     IF NEW.role_id NOT IN ('org_admin', 'tenant_admin', 'collection_merchant_admin', 'collection_merchant_view_only') THEN
         RETURN NEW;
     END IF;
-    IF lower(NEW.status) <> 'active' THEN
+    IF lower(NEW.status::text) <> 'active' THEN
         UPDATE logto_identity_binding SET status='disabled', updated_at=now()
         WHERE local_user_id=NEW.user_id AND role_id=NEW.role_id;
     END IF;

@@ -47,7 +47,7 @@ Hyperswitch 是商户、用户和组织归属的开户来源。完成本地开�
 
 开户成功但 Logto 暂时不可用时，待办事件保持 `pending` 并指数退避重试；未建好持久化绑定的用户不能凭 Logto 身份进入后台。同步完成、组织成员关系和预期收款角色均核对后才写入 `ready` 绑定。开户自带的 `org_admin` 只同步普通组织成员身份，不自动赋予收款商户角色。开户本身不自动创建 API Key、渠道账户或额度池，也不开放收款；这些仍由平台审核配置。Logto 的角色分配继续作为登录授权声明，本地 RBAC 必须同时匹配。直接在 Logto 调整角色只影响已存在的绑定用户，不触发开户；角色撤销后的既有 Hyperswitch 会话仍需单独实现失效与角色同步，不能仅靠下次登录检查。
 
-Management API 凭证只存服务端私有配置，并由专用 M2M 应用取得访问令牌；Logto 提供[服务端 M2M 接入说明](https://docs.logto.io/quick-starts/m2m)及[创建用户](https://openapi.logto.io/operation/operation-createuser)、[创建组织](https://openapi.logto.io/operation/operation-createorganization)接口。当前代码已包含全局用户库迁移、角色写入触发的持久化待办、单实例 Python 处理器及可选数据库绑定查询；部署前还需配置 M2M 应用、运行处理器并完成远端真实开户联调。平台管理员角色仍要求人工在 Logto 明确批准。撤权和旧会话失效尚未自动化。
+Management API 凭证只存服务端私有配置，并由专用 M2M 应用取得访问令牌；Logto 提供[服务端 M2M 接入说明](https://docs.logto.io/quick-starts/m2m)及[创建用户](https://openapi.logto.io/operation/operation-createuser)、[创建组织](https://openapi.logto.io/operation/operation-createorganization)接口。当前代码已包含全局用户库迁移、角色写入触发的持久化待办、单实例 Python 处理器及可选数据库绑定查询。隔离的远端调试环境已验证真实 Management API 创建、角色与组织绑定、幂等重放，以及 Control Center → Logto → OIDC 回调 → 指定商户首页的完整浏览器链路。生产部署仍需配置专用 M2M 应用并常驻运行处理器。平台管理员角色仍要求人工在 Logto 明确批准。撤权和旧会话失效尚未自动化。
 
 迁移 `migrations/2026-10-21-000001_logto_account_sync` 应应用到**全局用户数据库**。`user_roles` 写入 `org_admin` 或受管角色时会生成待办。服务端启用 `[platform].logto_identity_sync_enabled = true` 前，先确认迁移完成，并让处理器持续运行。处理器用私有 0600 JSON 配置启动：
 
@@ -64,7 +64,9 @@ Management API 凭证只存服务端私有配置，并由专用 M2M 应用取得
 
 数据库连接使用服务进程的 `PG*` 环境变量或受限的 PostgreSQL 服务文件，不能把密码写进命令参数。运行 `python3 -B scripts/logto_account_sync.py /private/logto-sync.json`；`--once` 只处理一个到期事件。Logto 临时错误会自动重试，身份冲突会留在待办表供平台排查。生产须单实例运行、记录告警并备份映射表。现有 Logto 用户要先安全迁移身份映射；处理器故意拒绝仅因邮箱相同而接管旧账号。
 
-新建 Logto 用户时不会复制 Hyperswitch 密码，也不会给用户设置 Logto 密码。若要让同步后的用户首次登录，须在 Logto 单独配置邮件验证码、邀请或其他身份验证方式；仅创建身份记录并不能完成实际登录。迁移不会自动回填既有角色，试运行前需逐个核对旧账号的 `sub` 绑定。
+`management_api_base` 与 `token_url` 是两个独立地址。Logto OSS 使用独立管理端点时，机器令牌可能从管理端点签发，而 `/api/*` Management API 仍由核心端点提供；部署时应分别验证，不能假设两者同源。
+
+新建 Logto 用户时不会复制 Hyperswitch 密码，也不会给用户设置 Logto 密码。同步器会生成不可猜测、稳定且与本地用户 ID 绑定的托管用户名，以兼容要求用户名资料的 Logto 策略；日常登录仍建议启用邮箱。若要让同步后的用户首次登录，须在 Logto 单独配置邮件验证码、邀请或其他身份验证方式；仅创建身份记录并不能完成实际登录。Logto 应设为 `SignIn` 模式以关闭自助注册，避免绕过 Hyperswitch 开户。迁移不会自动回填既有角色，试运行前需逐个核对旧账号的 `sub` 绑定。
 
 ## 自建 Logto 调试环境
 

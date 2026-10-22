@@ -7,6 +7,7 @@ another ID are never claimed by matching email. No passwords are copied.
 import argparse
 import base64
 import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -20,6 +21,11 @@ import urllib.request
 
 
 ROLES = {'org_admin', 'tenant_admin', 'collection_merchant_admin', 'collection_merchant_view_only'}
+
+
+def logto_username(user_id):
+    """Stable private username for Logto policies that require one."""
+    return 'hs_' + hashlib.sha256(user_id.encode('utf-8')).hexdigest()[:40]
 
 
 def sql_value(value):
@@ -211,15 +217,22 @@ class Logto:
 
     def ensure_user(self, user):
         user_id = user['user_id']
+        username = logto_username(user_id)
         path = '/api/users/' + urllib.parse.quote(user_id, safe='')
         existing = self.call('GET', path, allow_missing=True)
         if not existing:
             self.call('POST', '/api/users', {'id':user_id, 'primaryEmail':user['email'],
-                     'name':user['name'], 'customData':{'hyperswitch_user_id':user_id}})
+                     'username':username, 'name':user['name'],
+                     'customData':{'hyperswitch_user_id':user_id}})
             existing = self.call('GET', path)
         if existing.get('primaryEmail', '').lower() != user['email'].lower() or \
            existing.get('customData', {}).get('hyperswitch_user_id') != user_id:
             raise RuntimeError('Logto user ID or email belongs to another identity')
+        if not existing.get('username'):
+            self.call('PATCH', path, {'username': username})
+            existing = self.call('GET', path)
+        if existing.get('username') != username:
+            raise RuntimeError('Logto user has a conflicting managed username')
         return user_id
 
     def provision(self, db, item):

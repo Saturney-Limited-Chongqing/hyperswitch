@@ -119,6 +119,7 @@ pub fn build_redirection_response(redirect_url: String) -> ApplicationResponse<(
     use api_models::payments::RedirectionResponse;
     ApplicationResponse::JsonForRedirection(RedirectionResponse {
         return_url_with_query_params: redirect_url,
+        headers: Vec::new(),
     })
 }
 

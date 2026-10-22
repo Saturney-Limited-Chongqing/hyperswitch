@@ -336,6 +336,7 @@ pub fn mk_app(
         #[cfg(feature = "v1")]
         {
             server_app = server_app
+                .service(routes::UserV2Compat::server(state.clone()))
                 .service(routes::Files::server(state.clone()))
                 .service(routes::Disputes::server(state.clone()))
                 .service(routes::Blocklist::server(state.clone()))
@@ -354,6 +355,7 @@ pub fn mk_app(
         #[cfg(feature = "v2")]
         {
             server_app = server_app
+                .service(routes::UserAuth::server(state.clone()))
                 .service(routes::UserDeprecated::server(state.clone()))
                 .service(routes::ProcessTrackerDeprecated::server(state.clone()))
                 .service(routes::ProcessTracker::server(state.clone()))
