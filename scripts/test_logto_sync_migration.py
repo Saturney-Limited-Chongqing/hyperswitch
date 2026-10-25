@@ -33,6 +33,8 @@ try:
         "INSERT INTO users VALUES ('u1','u1@example.com','User One');")
     migration = Path(__file__).resolve().parents[1] / 'migrations/2026-10-21-000001_logto_account_sync/up.sql'
     sql(migration.read_text())
+    status_migration = Path(__file__).resolve().parents[1] / 'migrations/2026-10-25-000001_logto_user_status_sync/up.sql'
+    sql(status_migration.read_text())
     sql("INSERT INTO user_roles(user_id,org_id,merchant_id,role_id,status) VALUES "
         "('u1','o1','m1','collection_merchant_admin','active');")
     first = json.loads(sql('SELECT row_to_json(o) FROM logto_sync_outbox o;'))
@@ -65,10 +67,11 @@ try:
     assert sql(f'SELECT state FROM logto_sync_outbox WHERE id={active["id"]};') == 'done'
     sql("UPDATE users SET is_active=FALSE WHERE user_id='u1';")
     assert sql("SELECT status FROM logto_identity_binding WHERE role_id='collection_merchant_view_only';") == 'disabled'
+    assert sql(f'SELECT state FROM logto_sync_outbox WHERE id={active["id"]};') == 'pending'
     sql("UPDATE users SET is_active=TRUE WHERE user_id='u1';")
     assert sql(f'SELECT state FROM logto_sync_outbox WHERE id={active["id"]};') == 'pending'
     sql("UPDATE user_roles SET merchant_id='m2' WHERE id=3;")
     assert sql("SELECT status FROM logto_identity_binding WHERE role_id='collection_merchant_view_only';") == 'disabled'
-    print('Logto outbox migration: 12 checks passed')
+    print('Logto outbox migration: 13 checks passed')
 finally:
     sql(f'DROP SCHEMA IF EXISTS {schema} CASCADE;')

@@ -233,18 +233,34 @@ class Logto:
             existing = self.call('GET', path)
         if existing.get('username') != username:
             raise RuntimeError('Logto user has a conflicting managed username')
+        if existing.get('isSuspended') is True:
+            self.call('PATCH', path + '/is-suspended', {'isSuspended': False})
         return user_id
+
+    def suspend_managed_user(self, user_id):
+        path = '/api/users/' + urllib.parse.quote(user_id, safe='')
+        existing = self.call('GET', path, allow_missing=True)
+        if not existing:
+            return
+        if existing.get('customData', {}).get('hyperswitch_user_id') != user_id:
+            raise RuntimeError('Refusing to suspend a Logto identity not managed by Hyperswitch')
+        if existing.get('isSuspended') is not True:
+            self.call('PATCH', path + '/is-suspended', {'isSuspended': True})
 
     def provision(self, db, item):
         if item['role_id'] not in ROLES:
             raise RuntimeError('Role is not eligible for automatic provisioning')
-        if item['role_status'].lower() != 'active':
-            # The trigger disabled any existing local binding in the same role
-            # transaction. Do not recreate identity or grant a remote role.
+        user = db.user(item['local_user_id'])
+        if not user:
+            raise RuntimeError('Local user no longer exists')
+        if item['role_status'].lower() != 'active' or user['is_active'] is False:
+            # The local transaction already disabled the binding. Suspending the
+            # managed Logto identity prevents a disabled administrator from
+            # obtaining a new identity-provider session.
+            self.suspend_managed_user(item['local_user_id'])
             db.finish_unprivileged(item)
             return
-        user = db.user(item['local_user_id'])
-        if not user or not user['is_verified'] or user['is_active'] is False:
+        if not user['is_verified']:
             raise RuntimeError('Local user not active and verified yet')
         org_id = None
         if item['role_id'] != 'tenant_admin':

@@ -37,7 +37,7 @@ HYPERSWITCH_API_URL=https://api.example.com HYPERSWITCH_ADMIN_KEY='<admin-key>' 
 
 打开 `<dashboard-base-url>/?auth_id=<auth_id>` 登录。登录后仍签发普通 Hyperswitch 后台会话；API 继续校验本地 RBAC。为避免登录后切换到未获 Logto 授权的本地身份，Logto 绑定用户若有任何其他激活的本地角色或商户归属，登录会失败。需要多商户操作时应使用独立 Logto 账号及明确绑定。
 
-Logto 角色变更影响下次登录，不会自动撤销已经签发的 Hyperswitch 会话。紧急撤权应同时停用本地账号或撤销其后台会话。此接入不自动同步 Logto 用户或角色到数据库，也不接管支付连接器。
+Hyperswitch 是账号状态主数据源。停用本地用户或停用其受管管理员角色会通过 outbox 调用 Logto Management API 挂起对应的受管 Logto 用户；重新启用本地用户和角色后会解除挂起。Logto 挂起会阻止新的登录和 token，但不会自动撤销已经签发的 Hyperswitch 后台会话；紧急撤权仍应同时撤销其后台会话。此接入不从 Logto 反向创建用户或商户，也不接管支付连接器。
 
 ## 开户后单向同步（实验性，默认关闭）
 
@@ -49,7 +49,7 @@ Hyperswitch 是商户、用户和组织归属的开户来源。完成本地开�
 
 Management API 凭证只存服务端私有配置，并由专用 M2M 应用取得访问令牌；Logto 提供[服务端 M2M 接入说明](https://docs.logto.io/quick-starts/m2m)及[创建用户](https://openapi.logto.io/operation/operation-createuser)、[创建组织](https://openapi.logto.io/operation/operation-createorganization)接口。当前代码已包含全局用户库迁移、角色写入触发的持久化待办、单实例 Python 处理器及可选数据库绑定查询。隔离的远端调试环境已验证真实 Management API 创建、角色与组织绑定、幂等重放，以及 Control Center → Logto → OIDC 回调 → 指定商户首页的完整浏览器链路。生产部署仍需配置专用 M2M 应用并常驻运行处理器。平台管理员角色仍要求人工在 Logto 明确批准。撤权和旧会话失效尚未自动化。
 
-迁移 `migrations/2026-10-21-000001_logto_account_sync` 应应用到**全局用户数据库**。`user_roles` 写入 `org_admin` 或受管角色时会生成待办。服务端启用 `[platform].logto_identity_sync_enabled = true` 前，先确认迁移完成，并让处理器持续运行。处理器用私有 0600 JSON 配置启动：
+迁移 `migrations/2026-10-21-000001_logto_account_sync` 和 `migrations/2026-10-25-000001_logto_user_status_sync` 应按顺序应用到**全局用户数据库**。`user_roles` 写入 `org_admin` 或受管角色、用户停用或重新启用时都会生成待办。服务端启用 `[platform].logto_identity_sync_enabled = true` 前，先确认迁移完成，并让处理器持续运行。处理器用私有 0600 JSON 配置启动：
 
 ```json
 {

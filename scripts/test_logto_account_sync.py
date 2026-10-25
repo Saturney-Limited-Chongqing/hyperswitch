@@ -39,7 +39,10 @@ class FakeLogto(Logto):
         if path.startswith('/api/users/') and method == 'GET':
             return self.user
         if path.startswith('/api/users/') and method == 'PATCH':
-            self.user.update(body)
+            if path.endswith('/is-suspended'):
+                self.user['isSuspended'] = body['isSuspended']
+            else:
+                self.user.update(body)
             return self.user
         if path == '/api/users' and method == 'POST':
             self.user = {'id': body['id'], 'primaryEmail': body['primaryEmail'],
@@ -84,6 +87,32 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(self.logto.user['username'], logto_username('hs_user'))
         self.assertEqual(sum(method == 'PATCH' and path == '/api/users/hs_user'
                              for method, path, _ in self.logto.calls), 1)
+
+    def test_disabled_local_administrator_suspends_managed_logto_user(self):
+        self.logto.user = {'id':'hs_user', 'primaryEmail':'merchant@example.com',
+                           'username':logto_username('hs_user'), 'isSuspended':False,
+                           'customData':{'hyperswitch_user_id':'hs_user'}}
+        self.db.record['is_active'] = False
+        self.logto.provision(self.db, self.item)
+        self.assertTrue(self.logto.user['isSuspended'])
+        self.assertEqual(self.db.finished, [(1, 'unprivileged', None)])
+
+    def test_active_local_administrator_reactivates_managed_logto_user(self):
+        self.logto.user = {'id':'hs_user', 'primaryEmail':'merchant@example.com',
+                           'username':logto_username('hs_user'), 'isSuspended':True,
+                           'customData':{'hyperswitch_user_id':'hs_user'}}
+        self.logto.provision(self.db, self.item)
+        self.assertFalse(self.logto.user['isSuspended'])
+        self.assertEqual(self.db.finished[-1], (1, 'hs_user', 'org_logto'))
+
+    def test_refuses_to_suspend_identity_not_managed_by_hyperswitch(self):
+        self.logto.user = {'id':'hs_user', 'primaryEmail':'merchant@example.com',
+                           'username':logto_username('hs_user'), 'isSuspended':False,
+                           'customData':{'hyperswitch_user_id':'someone_else'}}
+        self.db.record['is_active'] = False
+        with self.assertRaises(RuntimeError):
+            self.logto.provision(self.db, self.item)
+        self.assertEqual(self.db.finished, [])
 
     def test_existing_email_with_wrong_id_cannot_be_claimed(self):
         self.logto.user = {'id':'other_user', 'primaryEmail':'merchant@example.com',
