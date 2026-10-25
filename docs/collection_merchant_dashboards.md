@@ -127,6 +127,9 @@ confirm payments against Stripe.
 
 ```sh
 export COLLECTION_TEST_FIXTURES=/private/tmp/collection-test-fixtures.json
+# Set a unique tag and an unclaimed domain when test.com is assigned to OIDC.
+export COLLECTION_TEST_EMAIL_TAG="smoke-$(date +%Y%m%d%H%M%S)"
+export COLLECTION_TEST_EMAIL_DOMAIN=example.org
 python3 -B scripts/bootstrap_collection_test.py --provision-disposable-database
 python3 -B scripts/test_collection_isolation.py
 cd control-center

@@ -3,6 +3,13 @@ import json, urllib.request, urllib.error, pathlib, os, argparse
 BASE = os.environ.get('COLLECTION_TEST_API_URL', 'http://127.0.0.1:18080')
 ADMIN = {'api-key': os.environ.get('COLLECTION_TEST_ADMIN_KEY', 'test_admin')}
 PASSWORD = 'IsolationTest2026!'
+EMAIL_TAG = os.environ.get('COLLECTION_TEST_EMAIL_TAG', '')
+EMAIL_DOMAIN = os.environ.get('COLLECTION_TEST_EMAIL_DOMAIN', 'test.com')
+
+
+def test_email(name):
+    suffix = f'-{EMAIL_TAG}' if EMAIL_TAG else ''
+    return f'{name}{suffix}@{EMAIL_DOMAIN}'
 
 def call(method, path, body=None, headers=None):
     data = None if body is None else json.dumps(body).encode()
@@ -62,9 +69,10 @@ if __name__ == '__main__':
         pid = account['default_profile']
         key = ok('POST', f'/api_keys/{mid}', {'name': 'Isolation integration key', 'expiration': 'never'}, ADMIN)
         merchants.append({'merchant_id': mid, 'profile_id': pid, 'api_key': key['api_key']})
-    status, result = call('POST', '/user/tenant_signup', {'name': 'Platform Test Admin', 'email': 'platform-isolation@test.com', 'password': PASSWORD}, ADMIN)
+    platform_email = test_email('platform-isolation')
+    status, result = call('POST', '/user/tenant_signup', {'name': 'Platform Test Admin', 'email': platform_email, 'password': PASSWORD}, ADMIN)
     assert status in (200, 201) or 'exists' in str(result).lower(), (status, result)
-    platform_token, _ = login('platform-isolation@test.com', PASSWORD)
+    platform_token, _ = login(platform_email, PASSWORD)
     platform_info = ok('GET', '/user', headers={'Authorization': 'Bearer ' + platform_token})
     for m, suffix in zip(merchants, ('a', 'b')):
         switched = {'token': platform_token} if platform_info.get('merchant_id') == m['merchant_id'] else ok('POST', '/user/switch/merchant', {'merchant_id': m['merchant_id']}, {'Authorization': 'Bearer ' + platform_token})
@@ -77,7 +85,7 @@ if __name__ == '__main__':
             channel = ok('POST', f"/account/{m['merchant_id']}/connectors", {'connector_type': 'payment_processor', 'connector_name': 'stripe', 'connector_account_details': {'auth_type': 'HeaderKey', 'api_key': 'sk_test_collection_isolation'}, 'profile_id': m['profile_id'], 'test_mode': True, 'disabled': False, 'connector_label': 'isolation_stripe_' + suffix, 'payment_methods_enabled': [{'payment_method': 'card', 'payment_method_types': [{'payment_method_type': 'credit', 'card_networks': ['Visa', 'Mastercard']}]}]}, {'Authorization': 'Bearer ' + m['platform_token']})
 
         m['connector_id'] = channel.get('merchant_connector_id', channel.get('id'))
-        email = f'collection-{suffix}-isolation@test.com'
+        email = test_email(f'collection-{suffix}-isolation')
         invited = ok('POST', '/user/user/invite_multiple', [{'email': email, 'name': 'Collection ' + suffix.upper(), 'role_id': 'collection_merchant_admin'}], {'Authorization': 'Bearer ' + m['platform_token']})
         if invited[0].get('password'):
             initial_password = invited[0]['password']
@@ -86,7 +94,7 @@ if __name__ == '__main__':
             initial_password = PASSWORD
         token, password = login(email, initial_password)
         m.update(email=email, password=password, token=token)
-    fixture = {'base_url': BASE, 'organization_id': orgid, 'platform_email': 'platform-isolation@test.com', 'password': PASSWORD, 'merchants': merchants}
+    fixture = {'base_url': BASE, 'organization_id': orgid, 'platform_email': platform_email, 'password': PASSWORD, 'merchants': merchants}
     target = pathlib.Path(os.environ.get('COLLECTION_TEST_FIXTURES', '/private/tmp/collection-test-fixtures.json'))
     target.write_text(json.dumps(fixture, indent=2))
     target.chmod(384)
