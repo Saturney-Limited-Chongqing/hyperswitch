@@ -246,6 +246,14 @@ class Logto:
             raise RuntimeError('Refusing to suspend a Logto identity not managed by Hyperswitch')
         if existing.get('isSuspended') is not True:
             self.call('PATCH', path + '/is-suspended', {'isSuspended': True})
+        sessions = self.call('GET', path + '/sessions') or {}
+        for session in sessions.get('sessions', []):
+            session_id = session.get('payload', {}).get('jti')
+            if not session_id:
+                raise RuntimeError('Logto returned a session without a revocable ID')
+            revoke_path = (path + '/sessions/' + urllib.parse.quote(session_id, safe='')
+                           + '?revokeGrantsTarget=all')
+            self.call('DELETE', revoke_path, allow_missing=True)
 
     def provision(self, db, item):
         if item['role_id'] not in ROLES:

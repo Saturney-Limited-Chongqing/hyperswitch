@@ -32,10 +32,18 @@ class FakeLogto(Logto):
     def __init__(self):
         self.user = None
         self.organization = None
+        self.sessions = []
         self.calls = []
 
     def call(self, method, path, body=None, allow_missing=False):
         self.calls.append((method, path, body))
+        if path == '/api/users/hs_user/sessions' and method == 'GET':
+            return {'sessions': list(self.sessions)}
+        if path.startswith('/api/users/hs_user/sessions/') and method == 'DELETE':
+            session_id = path.split('/sessions/', 1)[1].split('?', 1)[0]
+            self.sessions = [s for s in self.sessions
+                             if s.get('payload', {}).get('jti') != session_id]
+            return None
         if path.startswith('/api/users/') and method == 'GET':
             return self.user
         if path.startswith('/api/users/') and method == 'PATCH':
@@ -92,10 +100,24 @@ class ProvisionTests(unittest.TestCase):
         self.logto.user = {'id':'hs_user', 'primaryEmail':'merchant@example.com',
                            'username':logto_username('hs_user'), 'isSuspended':False,
                            'customData':{'hyperswitch_user_id':'hs_user'}}
+        self.logto.sessions = [{'payload': {'jti': 'session-1'}}]
         self.db.record['is_active'] = False
         self.logto.provision(self.db, self.item)
         self.assertTrue(self.logto.user['isSuspended'])
+        self.assertEqual(self.logto.sessions, [])
+        self.assertTrue(any(method == 'DELETE' and 'revokeGrantsTarget=all' in path
+                            for method, path, _ in self.logto.calls))
         self.assertEqual(self.db.finished, [(1, 'unprivileged', None)])
+
+    def test_session_without_revocable_id_fails_closed(self):
+        self.logto.user = {'id':'hs_user', 'primaryEmail':'merchant@example.com',
+                           'username':logto_username('hs_user'), 'isSuspended':False,
+                           'customData':{'hyperswitch_user_id':'hs_user'}}
+        self.logto.sessions = [{'payload': {}}]
+        self.db.record['is_active'] = False
+        with self.assertRaises(RuntimeError):
+            self.logto.provision(self.db, self.item)
+        self.assertEqual(self.db.finished, [])
 
     def test_active_local_administrator_reactivates_managed_logto_user(self):
         self.logto.user = {'id':'hs_user', 'primaryEmail':'merchant@example.com',

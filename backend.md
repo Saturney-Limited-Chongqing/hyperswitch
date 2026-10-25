@@ -251,7 +251,7 @@ server {
 ## 当前未完成/限制
 
 - V2 路由规划暂不提前筛除满额渠道，最终预留会拒绝超额；默认未绑定渠道仍可通过，需开启强制绑定开关并登记全部渠道。
-- Logto 单向开户同步已有实验性实现：全局用户库迁移会为 `org_admin` 及受管角色写入待办，`scripts/logto_account_sync.py` 用服务端 M2M 凭证创建 Logto 组织/用户/成员，并在 Hyperswitch 停用管理员时挂起受管 Logto 用户、重新启用时解除挂起；`[platform].logto_identity_sync_enabled` 控制 OIDC 是否查询持久化绑定，默认关闭。远程调试环境已验证真实 Logto Management API 的创建、角色分配、持久化绑定、幂等重放，以及 Control Center → Logto → OIDC 回调 → 指定商户首页的完整浏览器登录链路。从 Logto 新增用户反向建档保持停用；反向建商户 US / USD 默认值不再适用。生产前仍需部署专用 M2M 配置、旧身份迁移、动态收款权限登记和现有会话撤权。Logto 挂起不会自动废除已经签发的 Hyperswitch 会话；详见 `docs/logto_rbac.md`。
+- Logto 单向开户同步已有实验性实现：全局用户库迁移会为 `org_admin` 及受管角色写入待办，`scripts/logto_account_sync.py` 用服务端 M2M 凭证创建 Logto 组织/用户/成员。生产通过后台 API 停用管理员时，Hyperswitch 会立即将该用户加入 Redis JWT 黑名单；worker 同时挂起受管 Logto 用户，并吊销其全部当前 Logto session 与关联 grant/token。重新启用只允许重新登录，不复活旧会话。`[platform].logto_identity_sync_enabled` 控制 OIDC 是否查询持久化绑定，默认关闭。从 Logto 新增用户反向建档保持停用。生产前仍需部署专用 M2M 配置、旧身份迁移和常驻 worker；绕过后台直接改数据库不会写入 Hyperswitch Redis 黑名单。详见 `docs/logto_rbac.md`。
 - 彩虹兼容仍是上文 RSA 子集，保持拒绝 MD5；已有离线对账和外部结算记录，没有资金余额、自动打款/代付账本或多实例网关高可用。
 - 外部收单成功、完整 webhook、清结算时间与平台资金账本尚不能仅由现有测试证明；实际渠道必须逐个沙箱及生产小额验证。
 - 前端的上游高级功能页面尚未全面简体中文化。

@@ -37,7 +37,7 @@ HYPERSWITCH_API_URL=https://api.example.com HYPERSWITCH_ADMIN_KEY='<admin-key>' 
 
 打开 `<dashboard-base-url>/?auth_id=<auth_id>` 登录。登录后仍签发普通 Hyperswitch 后台会话；API 继续校验本地 RBAC。为避免登录后切换到未获 Logto 授权的本地身份，Logto 绑定用户若有任何其他激活的本地角色或商户归属，登录会失败。需要多商户操作时应使用独立 Logto 账号及明确绑定。
 
-Hyperswitch 是账号状态主数据源。停用本地用户或停用其受管管理员角色会通过 outbox 调用 Logto Management API 挂起对应的受管 Logto 用户；重新启用本地用户和角色后会解除挂起。Logto 挂起会阻止新的登录和 token，但不会自动撤销已经签发的 Hyperswitch 后台会话；紧急撤权仍应同时撤销其后台会话。此接入不从 Logto 反向创建用户或商户，也不接管支付连接器。
+Hyperswitch 是账号状态主数据源。通过后台停用本地用户或停用其受管管理员角色时，Hyperswitch 立即把该用户写入 Redis 黑名单，使此前签发的后台 JWT 在下一次请求失效；同一变更通过 outbox 调用 Logto Management API 挂起对应的受管 Logto 用户，并逐一吊销其当前 Logto session 及关联 grant/token。重新启用本地用户和角色后只解除 Logto 挂起，不恢复旧会话，用户必须重新登录。直接绕过后端写数据库不能同步写入 Redis，因此所有生产停用操作必须使用后台 API；常驻 worker 是完成 Logto 侧撤权的必要组件。此接入不从 Logto 反向创建用户或商户，也不接管支付连接器。
 
 ## 开户后单向同步（实验性，默认关闭）
 
