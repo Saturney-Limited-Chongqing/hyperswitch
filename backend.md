@@ -1,6 +1,6 @@
 # 后端交接：多商户收款中台
 
-更新基线：Hyperswitch `31bbeb0b2`（2026-10-21）；配套前端为独立仓库 `hyperswitch-control-center` 的 `frontend.md`（基线 `7e230e2`）。本仓库的 `cypress-tests/dashboard` 是测试报告，不是业务后台。本文记录相对上游的业务扩展和对接约束；具体协议与验证步骤以 `docs/` 和代码为准。
+更新基线：Hyperswitch `82f79d492`（2026-10-25）；配套前端为独立仓库 `hyperswitch-control-center` 的 `frontend.md`（基线 `f922a1e`）。本仓库的 `cypress-tests/dashboard` 是测试报告，不是业务后台。本文记录相对上游的业务扩展、前端契约、构建和部署方法；具体协议与验证步骤以 `docs/` 和代码为准。
 
 ## 架构与权限边界
 
@@ -52,6 +52,191 @@ V1/V2 支付执行路径可启用 `[platform].channel_daily_limits_enabled = tru
 6. **逐层验收。** 在远端调试机用假服务器/协议样本覆盖签名、金额、错误和 webhook，再用渠道沙箱密钥跑真实授权、查询、退款和异步通知；执行对应 `crates/router/tests/connectors/<name>.rs`、Rust 编译、双商户隔离、渠道限额及前端平台/商户可见性回归。生产上线先由平台创建连接器账户、限定路由和日限额，再做小额真实交易与退款核对。沙箱与生产凭据都放私有配置，不能提交。
 
 为了便于合入上游安全补丁，渠道差异尽量局限在新 Connector 文件、必要注册/配置项和前端对应项；不要改通用支付执行语义来适配单一渠道。每次 `update upstream` 后核对 trait、枚举、配置生成方式与 webhook 路径，再重新编译和回归。上游指南的行号和脚手架生成内容可能随版本变化，不应当成固定 API。
+
+## 交给 AI 重写前端时的后端契约
+
+新的中台前端可以使用任意框架（React、Vue、Svelte 等），不需要沿用 ReScript，但必须把本文件视为服务端契约。前端只负责展示、收集输入和调用 API；后端 RBAC、认证上下文和数据库隔离才是最终授权。建议先生成一个 API client 层，再写登录/会话层、角色路由守卫和页面，禁止在各组件中散落裸 `fetch`。
+
+前端至少区分三类身份：平台管理员 `tenant_admin`/`internal_admin`、商户管理员 `collection_merchant_admin`、商户只读 `collection_merchant_view_only`。登录后先调用 `GET /api/user` 取得当前用户、角色、组织、商户和 Profile，再调用 `GET /api/user/role/v2` 取得资源权限。平台用户通过 `GET /api/user/list/merchant` 获取允许访问的商户；切换商户使用 `POST /api/user/switch/merchant`，收到新会话 token 后必须清空旧商户缓存、取消旧请求并重新加载用户资料。商户用户不能从 URL、localStorage 或请求体自行选择别的商户。V1 后端兼容当前 Control Center 使用的 `/api/v2/user/list/*` 与 `/api/v2/user/switch/*`，新前端优先使用不带 `/v2` 的 V1 后台路径，减少混用。
+
+推荐页面分区如下：
+
+| 区域 | 页面 | 后端规则 |
+| --- | --- | --- |
+| 公共认证 | 登录方式选择、OIDC 跳转、OIDC 回调、登出 | 认证方式来自 `/api/user/auth/list`；URL 来自 `/api/user/auth/url`；回调 POST `/api/user/oidc` |
+| 平台管理 | 商户、成员、渠道账户、路由、渠道日限额、系统设置 | 只允许平台角色；渠道凭据永远不回显到浏览器 |
+| 商户工作区 | 订单、退款、客户、争议、报告、分析、API Key、回调事件 | 当前会话所属商户；页面每次切换后重新取数 |
+| 收银台 | 支付方式、SDK 容器、跳转/3DS 结果 | 只使用 publishable key 与单笔 `client_secret`，不使用后台 JWT 或 secret API key |
+
+前端 API 基地址采用同源 `/api` 最稳妥：浏览器访问 `https://console.example.com`，反向代理把 `https://console.example.com/api/*` 转发到 Router 的 `/*`，即转发时去掉 `/api` 前缀；当前 Control Center 的 webpack proxy 也是这个规则。这样 OIDC cookie、CORS 和部署环境切换更容易控制。若前后端跨域，必须在 Router CORS 配置中精确允许前端 origin，启用凭据，并禁止通配 origin。`[user].base_url` 必须等于浏览器实际访问的前端 origin；Logto 回调必须精确登记为 `<origin>/redirect/oidc/logto`。
+
+前端必须统一处理这些状态：401 清会话并回登录；403 显示权限不足而不是隐藏错误；404 对跨商户资源按不存在处理；409 显示幂等冲突；412 表示渠道额度或执行前置条件失败；5xx 保留请求 ID 供排查，支付/退款未知结果不得自动换单号重试。金额在 UI 可显示大单位，但 API 的 `amount`、`daily_limit` 等按对应接口要求使用整数最小货币单位；不得用 JavaScript 浮点数直接计算金额，使用整数或十进制定点库。
+
+前端重写完成的最低验收：平台账号可以管理两个商户和渠道；两个独立商户账号只能看到自己的订单、客户、退款、API Key 和回调；商户直接访问平台 URL 同时被前端和后端拒绝；切换商户后无旧数据闪现；Logto 登录、登出、过期会话和错误页可用；零额度在调用真实渠道前被拒绝；支付与退款未知状态不会显示为成功。
+
+## API、OpenAPI 与 SDK 接入教程
+
+V1 是本项目当前生产契约。仓库中的 `api-reference/v1/openapi_spec_v1.json` 是生成前端类型和通用 API client 的起点；`api-reference/v2/openapi_spec_v2.json` 仅供明确选择 V2 的模块使用，不能把两个版本的模型任意混合。自定义的渠道额度接口、OIDC 扩展、彩虹 RSA 网关若尚未出现在 OpenAPI，需要按本文件及 `docs/` 手工补充 client 类型。生成后的 client 文件应固定在前端仓库并随本后端提交更新，CI 比较 OpenAPI hash 或生成结果，发现变化时要求人工审查。
+
+认证凭据分四类，不能互换：
+
+| 凭据 | 使用位置 | 是否可进入浏览器 |
+| --- | --- | --- |
+| 平台管理员 `api-key` | 建商户、建渠道、系统配置等受信任服务端操作 | 否 |
+| 商户 secret API key | 商户服务端创建支付、退款、客户等 | 否 |
+| 后台会话 Bearer token/cookie | 管理中台调用 `/user`、订单、退款等后台 API | 只由后台会话流程管理，不写入日志或 URL |
+| Publishable key + 单笔 `client_secret` | 支付 Web SDK/收银台 | 是，但只能限制到对应商户和单笔支付 |
+
+标准收银台流程必须由商户服务端开始：商户服务端使用 secret API key 调用 `POST /payments`，传入整数最小单位金额、币种、Profile、return URL 和业务订单标识；Router 返回支付 ID 与 `client_secret`。商户服务端只把 publishable key、支付 ID 和该笔 `client_secret` 交给浏览器。浏览器加载已部署并固定版本的 `HyperLoader.js`，以这些公开凭据挂载支付组件；SDK 再从 Router 读取可用支付方式并确认支付。支付完成页必须由商户服务端查询 `GET /payments/{payment_id}` 或消费已验签 webhook 后决定最终状态，不能相信浏览器 return URL 参数。
+
+最小服务端请求示意（字段应以当前 OpenAPI 为准，示例值不能直接用于生产）：
+
+```sh
+curl -X POST "$HYPERSWITCH_API/payments" \
+  -H "Content-Type: application/json" \
+  -H "api-key: $MERCHANT_SECRET_API_KEY" \
+  -d '{
+    "amount": 1234,
+    "currency": "USD",
+    "confirm": false,
+    "profile_id": "profile_example",
+    "payment_id": "order_123",
+    "return_url": "https://shop.example.com/payment/return"
+  }'
+```
+
+浏览器只接收类似以下运行时配置，不能把 secret API key、管理员 Key、连接器密钥或 OIDC client secret 编译进 JavaScript：
+
+```json
+{
+  "apiBaseUrl": "https://pay-api.example.com",
+  "sdkUrl": "https://pay-sdk.example.com/0.16.7/v0/HyperLoader.js",
+  "publishableKey": "pk_...",
+  "paymentId": "order_123",
+  "clientSecret": "..."
+}
+```
+
+SDK 静态资源由独立 Web/SDK 构建产物提供，Router 的 `sdk_url` 只告诉页面去哪里加载脚本，不会自动托管 `HyperLoader.js`。生产必须使用 HTTPS、固定版本路径、正确的 CSP `script-src/connect-src/frame-src` 和缓存策略；升级 SDK 前在沙箱回归卡、钱包、跳转、3DS、取消和重复提交。中台后台本身不应加载收银台 SDK，除非实现专门的测试支付页面。
+
+退款由受信任服务端或有权限的后台会话调用原生 `/refunds` API；浏览器不能持有商户 secret API key。创建退款必须提供原支付和幂等退款标识，随后查询退款状态或消费 webhook。彩虹兼容客户只连接独立 `services/epay_v2` 服务，按前述 RSA 协议调用，不能直接把其签名私钥交给浏览器。
+
+## 后端构建教程
+
+构建至少需要 Rust toolchain、PostgreSQL client headers、OpenSSL、`pkg-config` 和 `protoc`。以仓库锁文件为准，不要随意执行依赖大版本升级。常用检查：
+
+```sh
+cargo fmt --all -- --check
+cargo check --locked -p router --bin router \
+  --no-default-features --features v1,olap,oltp,redis-rs
+cargo test --locked -p router \
+  --no-default-features --features v1,olap,oltp,redis-rs
+```
+
+开发二进制：
+
+```sh
+cargo build --locked -p router --bin router \
+  --no-default-features --features v1,olap,oltp,redis-rs
+CONFIG_DIR="$PWD/config" \
+ROUTER__SUPERPOSITION__BACKUP_FILE_PATH="$PWD/config/superposition_seed.toml" \
+RUST_MIN_STACK=16777216 \
+  target/debug/router -f /private/path/router.toml
+```
+
+生产优先构建不可变 Docker 镜像，不在生产主机现场编译：
+
+```sh
+docker build --pull --file Dockerfile \
+  --build-arg BINARY=router \
+  --build-arg VERSION_FEATURE_SET=v1 \
+  --build-arg CARGO_BUILD_PROFILE=release \
+  --tag registry.example.com/hyperswitch-router:<git-sha> .
+
+docker build --pull --file Dockerfile \
+  --build-arg BINARY=scheduler \
+  --build-arg VERSION_FEATURE_SET=v1 \
+  --build-arg CARGO_BUILD_PROFILE=release \
+  --tag registry.example.com/hyperswitch-scheduler:<git-sha> .
+```
+
+根 Dockerfile 使用 `--no-default-features --features release --features <v1|v2>`；不要把同时启用 V1/V2 当成默认生产方案。镜像必须以 Git SHA 标记并保留上一版以便回滚。资源较少的机器构建很慢；建议至少 8 核、16GB 内存，CI 应缓存 Cargo registry/git 与 `target`，但发布镜像仍需从干净 checkout 构建。
+
+本地依赖可用开发 Compose：
+
+```sh
+docker compose -f docker-compose-development.yml up -d \
+  pg redis-standalone superposition superposition-init migration_runner
+docker compose -f docker-compose-development.yml up -d hyperswitch-server
+curl -fsS http://localhost:8080/health
+curl -fsS http://localhost:8080/health/ready
+```
+
+开发 Compose 会从源码编译，适合首次联调而非生产。测试支付不得配置真实生产渠道。运行本项目定制回归时使用 `scripts/bootstrap_collection_test.py`、`test_collection_isolation.py`、`test_channel_limits.py`、`test_collection_payment_features.py`、`test_epay_refunds.py` 和 `services/epay_v2` 单测；夹具只允许指向 disposable 数据库。
+
+## 数据库、配置与生产部署教程
+
+生产至少准备 PostgreSQL、Redis、Router、反向代理；需要异步任务时部署 scheduler producer/consumer，需要 KV drainer 时按选定架构部署 drainer。Logto、Web SDK、Control Center 和彩虹兼容网关是独立服务，分别使用独立域名/路径、健康检查和发布版本。不要把 PostgreSQL、Redis 或内部管理端口暴露到公网。
+
+部署顺序：
+
+1. 从已审查提交构建并推送带 Git SHA 的 Router/Scheduler 镜像。
+2. 备份数据库并确认可恢复；先在 staging 对相同版本备份演练迁移和回滚。
+3. 使用与目标镜像同一提交的迁移目录运行 `DATABASE_URL=... just migrate`。本项目的渠道限额迁移在普通业务数据库；Logto 身份同步迁移必须应用到保存全局用户/角色的数据库。迁移任务只能单实例运行，成功后再启动新 Router。
+4. 通过 secret manager 注入数据库密码、Redis 凭据、`master_enc_key`、JWT secret、管理员 Key、OIDC secret、KMS/对象存储凭据和连接器密钥。配置模板可提交，真实值不能写入镜像、Git、前端变量或日志。
+5. 挂载只读生产配置，启动 Router：容器命令可显式使用 `/local/bin/router -f /run/secrets/router.toml`；也可用 `RUN_ENV`/`CONFIG_DIR` 和 `ROUTER__...` 环境变量覆盖。所有覆盖项在 staging 验证后才能进入生产。
+6. 启动 scheduler、Logto 同步 worker、Web SDK、Control Center 和可选的 `epay_v2`。每个进程单独设重启策略、资源限制、结构化日志和告警。
+7. 反向代理只公开 HTTPS API、后台、SDK及需要的 webhook；设置真实客户端 IP、请求体大小、超时和 HSTS。不要让代理缓存认证、支付、退款或 webhook 响应。
+8. 检查 `/health` 与 `/health/ready`，再用测试商户完成创建未确认支付、查询、额度拒绝、退款模拟、双商户越权拒绝和 OIDC 登录。生产真实渠道只做经过批准的小额交易。
+
+关键配置核对：
+
+| 配置 | 要求 |
+| --- | --- |
+| `[server]` | 监听容器内部地址；公网只经反向代理 |
+| 数据库/Redis | TLS、最小权限、连接池、备份与监控；凭据来自 secret manager |
+| `[user].base_url` | 后台浏览器真实 HTTPS origin |
+| `sdk_url` | 可公开访问、固定版本的 `HyperLoader.js` URL |
+| `platform.collection_merchant_ids` | 登记所有受收款型 service API Key 限制的商户 |
+| `channel_daily_limits_enabled` | 迁移和额度策略完成后才能开启 |
+| `channel_daily_limits_require_binding` | 所有活动渠道/币种都登记后开启，防止未绑定绕过 |
+| `logto_identity_sync_enabled` | 全局用户库迁移、M2M 和常驻 worker 均就绪后开启 |
+| `superposition.backup_file_path` | 指向镜像中真实存在的 `config/superposition_seed.toml`，避免配置服务故障拖垮请求 |
+
+推荐域名布局：`api.example.com` 给支付/API，`console.example.com` 给中台，`sdk.example.com` 给版本化 SDK，`auth.example.com` 给 Logto，`epay.example.com` 给 RSA 兼容网关。若中台使用同源代理，则 `console.example.com/api` 转发到 Router。所有回调和 issuer 必须使用最终 HTTPS 地址，不能在生产保留 ZeroTier IP、localhost 或 HTTP 开发豁免。
+
+中台静态站点可采用以下 Nginx 结构；`proxy_pass` 末尾的 `/` 用于去掉浏览器请求中的 `/api/` 前缀：
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name console.example.com;
+    root /usr/share/nginx/html;
+
+    location /api/ {
+        proxy_pass http://router:8080/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 60s;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+```
+
+新前端应生成静态 `dist/`，用多阶段 Dockerfile 在固定 Node 版本中执行 lockfile 安装、测试和生产构建，再把 `dist/` 复制到非 root 静态服务器镜像。推荐把公开环境放入启动时生成的 `/runtime-config.json`，并对该文件设置 `Cache-Control: no-store`，这样同一镜像可在 staging/production 使用不同 API、SDK 和 Logto public client ID；不要为了换域名重新注入任何 secret。`index.html` 和带内容 hash 的 JS/CSS 采用不同缓存策略：HTML 短缓存或不缓存，hash 资源长期 immutable。SPA 服务器必须将 `/redirect/oidc/logto`、`/redirect/oidc/rauthy` 及其他客户端路由回退到 `index.html`。
+
+发布采用滚动或蓝绿方式。先部署兼容旧前端的后端，再部署新前端；数据库迁移必须向后兼容至少一个发布窗口。回滚应用时不得盲目回滚数据库迁移，先判断新写入数据与旧代码是否兼容。部署后观察 401/403/409/412/5xx、支付未知状态、退款待定、额度预留、数据库连接池、Redis、scheduler 积压和 webhook 重试。日志必须携带请求 ID、商户 ID和支付/退款 ID，但过滤密码、token、卡数据、API Key和连接器响应中的敏感字段。
+
+## AI 前端交付清单
+
+把以下文件一并交给负责重写前端的 AI：本文件、前端仓库 `frontend.md`、`api-reference/v1/openapi_spec_v1.json`、`docs/collection_merchant_dashboards.md`、`docs/channel_limits_and_epay_v2.md`、`docs/logto_rbac.md` 与 `docs/rauthy_sso.md`。要求其输出：路由/页面清单、角色矩阵、生成 API client、统一错误处理、环境变量模板、Dockerfile、反向代理示例、构建脚本、测试脚本和部署说明。
+
+前端构建产物只能包含公开变量，例如 `PUBLIC_API_BASE_URL`、`PUBLIC_SDK_URL`、Logto public client ID；私密值只能存在于后端或部署 secret。CI 至少执行类型检查、单元测试、生产构建、依赖漏洞检查和浏览器双商户回归。部署后用两个不同商户账号验证缓存隔离，并检查浏览器 Network/Application 面板不存在 secret API key、管理员 Key、OIDC client secret 或连接器凭据。
 
 ## 联调、测试和升级
 
