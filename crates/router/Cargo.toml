@@ -15,7 +15,6 @@ default = [
     "redis-rs",
     "connector-full",
     "identity-logto",
-    "identity-rauthy",
 ]
 connector-full = ["stripe"]
 connector-adyen = []

@@ -3,7 +3,7 @@ set -euo pipefail
 
 version_feature="${VERSION_FEATURE_SET:-v1}"
 connector_selection="${CONNECTORS:-full}"
-identity_selection="${IDENTITY_PROVIDERS:-}"
+identity_selection="${IDENTITY_PROVIDERS-logto}"
 features=("release" "${version_feature}" "redis-rs")
 
 append_csv_features() {

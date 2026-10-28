@@ -164,7 +164,7 @@ docker build --pull --file Dockerfile \
 
 ### 按需编译渠道与身份提供方
 
-仓库根目录的 `build.sh`、`test.sh` 使用同一套构建选择器。默认 `CONNECTORS=full` 保持上游所有渠道可用；精简部署以逗号分隔选择 `adyen,airwallex,checkout,paypal,stripe`。未选择的渠道不会进入 Router 的构造注册表，即使 TOML 中残留该渠道地址也无法创建或路由。Logto 与 Rauthy 也必须用 `IDENTITY_PROVIDERS` 显式选择；未编译的 provider 名称无法反序列化为认证配置。示例：
+仓库根目录的 `build.sh`、`test.sh` 使用同一套构建选择器。默认 `CONNECTORS=full` 保持上游所有渠道可用，默认 `IDENTITY_PROVIDERS=logto` 启用 Logto；精简部署以逗号分隔选择 `adyen,airwallex,checkout,paypal,stripe`。未选择的渠道不会进入 Router 的构造注册表，即使 TOML 中残留该渠道地址也无法创建或路由。Rauthy 需要通过 `IDENTITY_PROVIDERS=rauthy` 或 `logto,rauthy` 显式加入；未编译的 provider 名称无法反序列化为认证配置。若明确需要关闭全部外部身份提供方，应传入空值 `IDENTITY_PROVIDERS=`。示例：
 
 ```bash
 # 只构建 Stripe + PayPal，并启用 Logto

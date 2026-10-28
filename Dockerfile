@@ -3,7 +3,7 @@ FROM public.ecr.aws/docker/library/rust:trixie as builder
 ARG EXTRA_FEATURES=""
 ARG VERSION_FEATURE_SET="v1"
 ARG CONNECTOR_FEATURES="connector-full"
-ARG IDENTITY_FEATURES=""
+ARG IDENTITY_FEATURES="identity-logto"
 
 # Which cargo profile compiles the binaries: `release` (default, production),
 # `release-fast` (optimized, no LTO, for development cycles) or `dev`
