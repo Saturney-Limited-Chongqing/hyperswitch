@@ -9,7 +9,22 @@ readme = "README.md"
 license.workspace = true
 
 [features]
-default = ["common_default", "v1", "redis-rs"]
+default = [
+    "common_default",
+    "v1",
+    "redis-rs",
+    "connector-full",
+    "identity-logto",
+    "identity-rauthy",
+]
+connector-full = ["stripe"]
+connector-adyen = []
+connector-airwallex = []
+connector-checkout = []
+connector-paypal = []
+connector-stripe = ["stripe"]
+identity-logto = ["api_models/identity-logto"]
+identity-rauthy = ["api_models/identity-rauthy"]
 common_default = [
     "kv_store",
     "stripe",
@@ -62,7 +77,6 @@ gcp_kms = ["external_services/gcp_kms"]
 oci_kms = ["external_services/oci_kms"]
 oci_object_storage = ["external_services/oci_object_storage"]
 release = [
-    "stripe",
     "email",
     "accounts_cache",
     "kv_store",

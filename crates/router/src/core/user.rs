@@ -3015,6 +3015,26 @@ pub async fn list_user_authentication_methods(
     ))
 }
 
+#[cfg(feature = "identity-rauthy")]
+fn is_rauthy_provider(provider: user_api::OpenIdProvider) -> bool {
+    provider == user_api::OpenIdProvider::Rauthy
+}
+
+#[cfg(not(feature = "identity-rauthy"))]
+fn is_rauthy_provider(_: user_api::OpenIdProvider) -> bool {
+    false
+}
+
+#[cfg(feature = "identity-logto")]
+fn is_logto_provider(provider: user_api::OpenIdProvider) -> bool {
+    provider == user_api::OpenIdProvider::Logto
+}
+
+#[cfg(not(feature = "identity-logto"))]
+fn is_logto_provider(_: user_api::OpenIdProvider) -> bool {
+    false
+}
+
 pub async fn get_sso_auth_url(
     state: SessionState,
     request: user_api::GetSsoAuthUrlRequest,
@@ -3048,17 +3068,16 @@ pub async fn get_sso_auth_url(
     let redirect_url =
         utils::user::get_oidc_sso_redirect_url(&state, &open_id_public_config.name.to_string());
 
-    let strict_oidc = matches!(
-        open_id_public_config.name,
-        user_api::OpenIdProvider::Rauthy | user_api::OpenIdProvider::Logto
-    );
+    let is_rauthy = is_rauthy_provider(open_id_public_config.name);
+    let is_logto = is_logto_provider(open_id_public_config.name);
+    let strict_oidc = is_rauthy || is_logto;
     let browser_cookie = if strict_oidc {
         let secure = state.conf.user.base_url.starts_with("https://");
-        let name = match (open_id_public_config.name, secure) {
-            (user_api::OpenIdProvider::Logto, true) => consts::user::LOGTO_STATE_COOKIE_SECURE,
-            (user_api::OpenIdProvider::Logto, false) => consts::user::LOGTO_STATE_COOKIE,
-            (_, true) => consts::user::RAUTHY_STATE_COOKIE_SECURE,
-            (_, false) => consts::user::RAUTHY_STATE_COOKIE,
+        let name = match (is_logto, secure) {
+            (true, true) => consts::user::LOGTO_STATE_COOKIE_SECURE,
+            (true, false) => consts::user::LOGTO_STATE_COOKIE,
+            (false, true) => consts::user::RAUTHY_STATE_COOKIE_SECURE,
+            (false, false) => consts::user::RAUTHY_STATE_COOKIE,
         };
         Some(format!(
             "{name}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
@@ -3077,7 +3096,7 @@ pub async fn get_sso_auth_url(
         open_id_private_config.base_url.into(),
         open_id_private_config.client_id,
         strict_oidc,
-        open_id_public_config.name == user_api::OpenIdProvider::Logto,
+        is_logto,
     )
     .await
     .map(|url| {
@@ -3102,6 +3121,7 @@ pub async fn get_sso_auth_url(
     })
 }
 
+#[cfg(feature = "identity-logto")]
 fn logto_claim_allows_binding(
     binding: &user_api::LogtoRoleBinding,
     roles: &[String],
@@ -3125,7 +3145,12 @@ fn logto_claim_allows_binding(
     }
 }
 
-#[cfg(test)]
+#[cfg(not(feature = "identity-logto"))]
+fn logto_claim_allows_binding(_: &user_api::LogtoRoleBinding, _: &[String], _: &[String]) -> bool {
+    false
+}
+
+#[cfg(all(test, feature = "identity-logto"))]
 mod logto_role_tests {
     use api_models::user::LogtoRoleBinding;
 
@@ -3211,8 +3236,8 @@ pub async fn sso_sign(
 
     let redirect_url =
         utils::user::get_oidc_sso_redirect_url(&state, &open_id_public_config.name.to_string());
-    let is_rauthy = open_id_public_config.name == user_api::OpenIdProvider::Rauthy;
-    let is_logto = open_id_public_config.name == user_api::OpenIdProvider::Logto;
+    let is_rauthy = is_rauthy_provider(open_id_public_config.name);
+    let is_logto = is_logto_provider(open_id_public_config.name);
     if is_rauthy || is_logto {
         let name = match (is_logto, state.conf.user.base_url.starts_with("https://")) {
             (true, true) => consts::user::LOGTO_STATE_COOKIE_SECURE,

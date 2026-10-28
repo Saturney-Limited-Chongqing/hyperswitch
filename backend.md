@@ -162,6 +162,30 @@ docker build --pull --file Dockerfile \
 
 根 Dockerfile 使用 `--no-default-features --features release --features <v1|v2>`；不要把同时启用 V1/V2 当成默认生产方案。镜像必须以 Git SHA 标记并保留上一版以便回滚。资源较少的机器构建很慢；建议至少 8 核、16GB 内存，CI 应缓存 Cargo registry/git 与 `target`，但发布镜像仍需从干净 checkout 构建。
 
+### 按需编译渠道与身份提供方
+
+仓库根目录的 `build.sh`、`test.sh` 使用同一套构建选择器。默认 `CONNECTORS=full` 保持上游所有渠道可用；精简部署以逗号分隔选择 `adyen,airwallex,checkout,paypal,stripe`。未选择的渠道不会进入 Router 的构造注册表，即使 TOML 中残留该渠道地址也无法创建或路由。Logto 与 Rauthy 也必须用 `IDENTITY_PROVIDERS` 显式选择；未编译的 provider 名称无法反序列化为认证配置。示例：
+
+```bash
+# 只构建 Stripe + PayPal，并启用 Logto
+CONNECTORS=stripe,paypal IDENTITY_PROVIDERS=logto ./build.sh
+
+# 完整渠道，启用 Logto 与 Rauthy，并检查所有 target
+CONNECTORS=full IDENTITY_PROVIDERS=logto,rauthy ./test.sh
+
+# 内存充足的 CI 才启用所有测试/示例 target 检查
+ALL_TARGETS=true CONNECTORS=full IDENTITY_PROVIDERS=logto,rauthy ./test.sh
+
+# Docker 与 Cargo 使用相同 feature；精简生产镜像
+docker build \
+  --build-arg CONNECTOR_FEATURES=connector-stripe,connector-paypal \
+  --build-arg IDENTITY_FEATURES=identity-logto \
+  --build-arg VERSION_FEATURE_SET=v1 \
+  -t hyperswitch-router:$(git rev-parse --short HEAD) .
+```
+
+渠道选择是编译期白名单而不是运行时开关。新增渠道时同时增加 `connector-<name>` feature、精简注册表分支和 `resolve_build_features.sh` 允许项；完整上游构建仍走 `connector-full`，从而减少长期合并冲突。OIDC 通用代码仍由 Router 共用，`identity-logto` 仅加入 Logto 角色/组织语义，`identity-rauthy` 仅加入 Rauthy 严格绑定语义。
+
 本地依赖可用开发 Compose：
 
 ```sh

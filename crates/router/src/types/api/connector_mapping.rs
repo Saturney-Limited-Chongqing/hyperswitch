@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use error_stack::{report, ResultExt};
+#[cfg(feature = "connector-full")]
 use hyperswitch_connectors::connectors::{
     Citigate, Payconex, Paynearme, Paytm, Phonepe, Worldpayraft, D24,
 };
@@ -100,6 +101,7 @@ impl ConnectorData {
         })
     }
 
+    #[cfg(feature = "connector-full")]
     pub fn convert_connector(
         connector_name: &str,
     ) -> CustomResult<ConnectorEnum, errors::ApiErrorResponse> {
@@ -570,6 +572,48 @@ impl ConnectorData {
                     Ok(ConnectorEnum::Old(Box::new(Worldpayraft::new())))
                 }
                 enums::Connector::Paynearme => Ok(ConnectorEnum::Old(Box::new(Paynearme::new()))),
+            },
+            Err(_) => Err(report!(errors::ConnectorError::InvalidConnectorName)
+                .attach_printable(format!("invalid connector name: {connector_name}")))
+            .change_context(errors::ApiErrorResponse::InternalServerError),
+        }
+    }
+
+    /// Build-time connector allowlist used by compact deployments. Connector
+    /// implementations not selected here cannot be constructed or configured
+    /// by the router. `connector-full` retains upstream's complete registry.
+    #[cfg(not(feature = "connector-full"))]
+    pub fn convert_connector(
+        connector_name: &str,
+    ) -> CustomResult<ConnectorEnum, errors::ApiErrorResponse> {
+        match enums::Connector::from_str(connector_name) {
+            Ok(name) => match name {
+                #[cfg(feature = "connector-adyen")]
+                enums::Connector::Adyen => {
+                    Ok(ConnectorEnum::Old(Box::new(connector::Adyen::new())))
+                }
+                #[cfg(feature = "connector-airwallex")]
+                enums::Connector::Airwallex => {
+                    Ok(ConnectorEnum::Old(Box::new(connector::Airwallex::new())))
+                }
+                #[cfg(feature = "connector-checkout")]
+                enums::Connector::Checkout => {
+                    Ok(ConnectorEnum::Old(Box::new(connector::Checkout::new())))
+                }
+                #[cfg(feature = "connector-paypal")]
+                enums::Connector::Paypal => {
+                    Ok(ConnectorEnum::Old(Box::new(connector::Paypal::new())))
+                }
+                #[cfg(feature = "connector-stripe")]
+                enums::Connector::Stripe => {
+                    Ok(ConnectorEnum::Old(Box::new(connector::Stripe::new())))
+                }
+                _ => Err(
+                    report!(errors::ConnectorError::InvalidConnectorName).attach_printable(
+                        format!("connector {connector_name} is not compiled into this router"),
+                    ),
+                )
+                .change_context(errors::ApiErrorResponse::InternalServerError),
             },
             Err(_) => Err(report!(errors::ConnectorError::InvalidConnectorName)
                 .attach_printable(format!("invalid connector name: {connector_name}")))

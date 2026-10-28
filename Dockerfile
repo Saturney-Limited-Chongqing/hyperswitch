@@ -2,6 +2,8 @@ FROM public.ecr.aws/docker/library/rust:trixie as builder
 
 ARG EXTRA_FEATURES=""
 ARG VERSION_FEATURE_SET="v1"
+ARG CONNECTOR_FEATURES="connector-full"
+ARG IDENTITY_FEATURES=""
 
 # Which cargo profile compiles the binaries: `release` (default, production),
 # `release-fast` (optimized, no LTO, for development cycles) or `dev`
@@ -40,7 +42,10 @@ RUN cargo build \
     --profile ${CARGO_BUILD_PROFILE} \
     --no-default-features \
     --features release \
+    --features redis-rs \
     --features ${VERSION_FEATURE_SET} \
+    --features ${CONNECTOR_FEATURES} \
+    ${IDENTITY_FEATURES:+--features ${IDENTITY_FEATURES}} \
     ${EXTRA_FEATURES}
 
 # Stage the binary at a profile-independent path for the runtime stage

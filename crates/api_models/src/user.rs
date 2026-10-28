@@ -357,7 +357,9 @@ pub struct OpenIdConnectPublicConfig {
 #[strum(serialize_all = "snake_case")]
 pub enum OpenIdProvider {
     Okta,
+    #[cfg(feature = "identity-rauthy")]
     Rauthy,
+    #[cfg(feature = "identity-logto")]
     Logto,
 }
 
